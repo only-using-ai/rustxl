@@ -1,18 +1,24 @@
 use crate::spreadsheet::Spreadsheet;
 
 impl Spreadsheet {
-    pub fn evaluate_cell(&self, row: usize, col: usize) -> String {
-        let content = self.get_cell(row, col);
+    pub fn evaluate_cell(&mut self, row: usize, col: usize) -> String {
+        let content = self.get_cell(row, col).to_string();
         if content.starts_with('=') {
-            self.evaluate_formula(content)
+            self.evaluate_formula(&content, row, col)
         } else {
-            content.to_string()
+            content
         }
     }
 
-    pub fn evaluate_formula(&self, formula: &str) -> String {
+    pub fn evaluate_formula(&mut self, formula: &str, row: usize, col: usize) -> String {
         let expr = formula.strip_prefix('=').unwrap_or(formula).trim();
         let expr_upper = expr.to_uppercase();
+
+        // Handle SHELL function (case-insensitive)
+        if expr_upper.starts_with("SHELL(") && expr_upper.ends_with(')') {
+            let inner = &expr[6..expr.len() - 1];
+            return self.evaluate_shell(inner, row, col);
+        }
 
         // Handle SUM function (case-insensitive)
         if expr_upper.starts_with("SUM(") && expr_upper.ends_with(')') {
@@ -20,10 +26,16 @@ impl Spreadsheet {
             return self.evaluate_sum(inner);
         }
 
+        // Handle AVG function (case-insensitive)
+        if expr_upper.starts_with("AVG(") && expr_upper.ends_with(')') {
+            let inner = &expr[4..expr.len() - 1];
+            return self.evaluate_avg(inner);
+        }
+
         // Handle IF function (case-insensitive)
         if expr_upper.starts_with("IF(") && expr_upper.ends_with(')') {
             let inner = &expr[3..expr.len() - 1];
-            return self.evaluate_if(inner);
+            return self.evaluate_if(inner, row, col);
         }
 
         // Handle simple arithmetic
@@ -39,7 +51,7 @@ impl Spreadsheet {
         "#ERROR".to_string()
     }
 
-    pub fn evaluate_sum(&self, args: &str) -> String {
+    pub fn evaluate_sum(&mut self, args: &str) -> String {
         let mut sum = 0.0;
 
         for arg in args.split(',') {
@@ -73,7 +85,55 @@ impl Spreadsheet {
         format!("{}", sum)
     }
 
-    pub fn evaluate_if(&self, args: &str) -> String {
+    pub fn evaluate_avg(&mut self, args: &str) -> String {
+        let mut sum = 0.0;
+        let mut count = 0.0;
+
+        for arg in args.split(',') {
+            let arg = arg.trim();
+
+            if let Some((start, end)) = arg.split_once(':') {
+                if let (Some((sr, sc)), Some((er, ec))) =
+                    (self.parse_cell_ref(start), self.parse_cell_ref(end))
+                {
+                    let min_row = sr.min(er);
+                    let max_row = sr.max(er);
+                    let min_col = sc.min(ec);
+                    let max_col = sc.max(ec);
+                    for row in min_row..=max_row {
+                        for col in min_col..=max_col {
+                            if let Some(val) = self.get_cell_value_at(row, col) {
+                                sum += val;
+                                count += 1.0;
+                            }
+                        }
+                    }
+                } else {
+                    return "#ERROR".to_string();
+                }
+            } else if let Some(val) = self.get_cell_value(arg) {
+                sum += val;
+                count += 1.0;
+            } else if let Ok(val) = arg.parse::<f64>() {
+                sum += val;
+                count += 1.0;
+            }
+        }
+
+        if count == 0.0 {
+            return "#ERROR".to_string();
+        }
+
+        let avg = sum / count;
+        // Format with reasonable precision
+        if avg.fract() == 0.0 {
+            format!("{:.0}", avg)
+        } else {
+            format!("{}", avg)
+        }
+    }
+
+    pub fn evaluate_if(&mut self, args: &str, current_row: usize, current_col: usize) -> String {
         let parts = self.split_function_args(args);
         if parts.len() != 3 {
             return "#ERROR".to_string();
@@ -83,11 +143,11 @@ impl Spreadsheet {
         let value_true = parts[1].trim();
         let value_false = parts[2].trim();
 
-        let result = self.evaluate_condition(condition);
+        let result = self.evaluate_condition(condition, current_row, current_col);
 
         match result {
-            Some(true) => self.evaluate_arg(value_true),
-            Some(false) => self.evaluate_arg(value_false),
+            Some(true) => self.evaluate_arg(value_true, current_row, current_col),
+            Some(false) => self.evaluate_arg(value_false, current_row, current_col),
             None => "#ERROR".to_string(),
         }
     }
@@ -112,7 +172,7 @@ impl Spreadsheet {
         parts
     }
 
-    pub fn evaluate_condition(&self, condition: &str) -> Option<bool> {
+    pub fn evaluate_condition(&mut self, condition: &str, current_row: usize, current_col: usize) -> Option<bool> {
         let operators = [">=", "<=", "<>", ">", "<", "="];
 
         for op in operators {
@@ -120,8 +180,8 @@ impl Spreadsheet {
                 let left = condition[..pos].trim();
                 let right = condition[pos + op.len()..].trim();
 
-                let left_val = self.evaluate_arg_as_number(left)?;
-                let right_val = self.evaluate_arg_as_number(right)?;
+                let left_val = self.evaluate_arg_as_number(left, current_row, current_col)?;
+                let right_val = self.evaluate_arg_as_number(right, current_row, current_col)?;
 
                 return Some(match op {
                     ">=" => left_val >= right_val,
@@ -135,18 +195,23 @@ impl Spreadsheet {
             }
         }
 
-        self.evaluate_arg_as_number(condition).map(|v| v.abs() > f64::EPSILON)
+        self.evaluate_arg_as_number(condition, current_row, current_col).map(|v| v.abs() > f64::EPSILON)
     }
 
-    pub fn evaluate_arg(&self, arg: &str) -> String {
+    pub fn evaluate_arg(&mut self, arg: &str, current_row: usize, current_col: usize) -> String {
         let arg = arg.trim();
 
-        if arg.starts_with('"') && arg.ends_with('"') && arg.len() >= 2 {
-            return arg[1..arg.len() - 1].to_string();
+        // Check for matching quotes (single or double)
+        if arg.len() >= 2 {
+            let first_char = arg.chars().next().unwrap();
+            let last_char = arg.chars().last().unwrap();
+            if (first_char == '"' && last_char == '"') || (first_char == '\'' && last_char == '\'') {
+                return arg[1..arg.len() - 1].to_string();
+            }
         }
 
         if arg.contains('(') {
-            return self.evaluate_formula(&format!("={}", arg));
+            return self.evaluate_formula(&format!("={}", arg), current_row, current_col);
         }
 
         if let Some((row, col)) = self.parse_cell_ref(arg) {
@@ -160,11 +225,11 @@ impl Spreadsheet {
         arg.to_string()
     }
 
-    pub fn evaluate_arg_as_number(&self, arg: &str) -> Option<f64> {
+    pub fn evaluate_arg_as_number(&mut self, arg: &str, current_row: usize, current_col: usize) -> Option<f64> {
         let arg = arg.trim();
 
         if arg.contains('(') {
-            let result = self.evaluate_formula(&format!("={}", arg));
+            let result = self.evaluate_formula(&format!("={}", arg), current_row, current_col);
             return result.parse().ok();
         }
 
@@ -175,7 +240,7 @@ impl Spreadsheet {
         arg.parse().ok()
     }
 
-    pub fn evaluate_arithmetic(&self, expr: &str) -> Result<f64, ()> {
+    pub fn evaluate_arithmetic(&mut self, expr: &str) -> Result<f64, ()> {
         let expr = expr.trim();
 
         for (i, c) in expr.char_indices().rev() {
@@ -234,17 +299,148 @@ impl Spreadsheet {
         Some((row, col))
     }
 
-    pub fn get_cell_value(&self, cell_ref: &str) -> Option<f64> {
+    pub fn get_cell_value(&mut self, cell_ref: &str) -> Option<f64> {
         let (row, col) = self.parse_cell_ref(cell_ref)?;
         self.get_cell_value_at(row, col)
     }
 
-    pub fn get_cell_value_at(&self, row: usize, col: usize) -> Option<f64> {
-        let content = self.get_cell(row, col);
+    pub fn get_cell_value_at(&mut self, row: usize, col: usize) -> Option<f64> {
+        let content = self.get_cell(row, col).to_string();
         if content.starts_with('=') {
-            self.evaluate_formula(content).parse().ok()
+            // SHELL formulas don't return numeric values, so skip them
+            let expr = content.strip_prefix('=').unwrap_or(&content).trim();
+            let expr_upper = expr.to_uppercase();
+            if expr_upper.starts_with("SHELL(") {
+                return None;
+            }
+            // For other formulas, evaluate and try to parse as number
+            self.evaluate_formula(&content, row, col).parse().ok()
         } else {
             content.parse().ok()
+        }
+    }
+
+    pub fn evaluate_shell(&mut self, args: &str, start_row: usize, start_col: usize) -> String {
+        // Parse the command argument - handle quoted strings (single or double quotes)
+        let command = if args.len() >= 2 {
+            let first_char = args.chars().next().unwrap();
+            let last_char = args.chars().last().unwrap();
+            if (first_char == '"' && last_char == '"') || (first_char == '\'' && last_char == '\'') {
+                args[1..args.len() - 1].to_string()
+            } else {
+                args.trim().to_string()
+            }
+        } else {
+            args.trim().to_string()
+        };
+
+        if command.is_empty() {
+            return "#ERROR".to_string();
+        }
+
+        // Execute the shell command
+        let output = if cfg!(target_os = "windows") {
+            std::process::Command::new("cmd")
+                .args(["/C", &command])
+                .output()
+        } else {
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&command)
+                .output()
+        };
+
+        match output {
+            Ok(output) => {
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return format!("#ERROR: {}", stderr.trim());
+                }
+
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let output_text = stdout.trim();
+
+                if output_text.is_empty() {
+                    return "OK".to_string();
+                }
+
+                // Try to detect if output is tabular (multiple columns)
+                let lines: Vec<&str> = output_text.lines().collect();
+                if lines.is_empty() {
+                    return "OK".to_string();
+                }
+
+                // Check if it looks like a table (multiple columns separated by whitespace)
+                // Consider it tabular if at least 50% of non-empty lines have multiple columns
+                let non_empty_lines: Vec<&str> = lines.iter()
+                    .filter(|line| !line.trim().is_empty())
+                    .copied()
+                    .collect();
+                
+                if non_empty_lines.is_empty() {
+                    return "OK".to_string();
+                }
+
+                let multi_col_lines = non_empty_lines.iter()
+                    .filter(|line| {
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        parts.len() > 1
+                    })
+                    .count();
+                
+                let is_tabular = multi_col_lines * 2 >= non_empty_lines.len(); // At least 50%
+
+                if is_tabular {
+                    // Parse as table - split by whitespace
+                    let mut current_row = start_row;
+                    let mut max_cols = 0;
+                    
+                    for line in lines {
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        
+                        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+                        if !parts.is_empty() {
+                            max_cols = max_cols.max(parts.len());
+                            let mut current_col = start_col;
+                            for part in parts {
+                                // Only write if we're in the first row or if the cell is empty
+                                // This prevents overwriting existing data in subsequent rows
+                                if current_row == start_row || self.get_cell(current_row, current_col).is_empty() {
+                                    self.set_cell(current_row, current_col, part.to_string());
+                                }
+                                current_col += 1;
+                            }
+                            current_row += 1;
+                        }
+                    }
+                    
+                    // Update dimensions if needed
+                    if current_row > self.num_rows {
+                        self.num_rows = current_row;
+                    }
+                    if start_col + max_cols > self.num_cols {
+                        self.num_cols = start_col + max_cols;
+                    }
+                    "OK".to_string()
+                } else {
+                    // Simple text output - write to current cell
+                    // If it's multi-line but not tabular, join with spaces or keep as-is
+                    let text = if lines.len() > 1 {
+                        // For multi-line non-tabular output, join with newlines
+                        output_text.to_string()
+                    } else {
+                        output_text.to_string()
+                    };
+                    self.set_cell(start_row, start_col, text);
+                    "OK".to_string()
+                }
+            }
+            Err(e) => {
+                format!("#ERROR: {}", e)
+            }
         }
     }
 }
@@ -269,8 +465,21 @@ mod tests {
         sheet.set_cell(1, 0, "20".to_string());
         sheet.set_cell(2, 0, "30".to_string());
 
-        assert_eq!(sheet.evaluate_formula("=SUM(A1:A3)"), "60");
-        assert_eq!(sheet.evaluate_formula("=SUM(A3:A1)"), "60"); // reversed range
+        assert_eq!(sheet.evaluate_formula("=SUM(A1:A3)", 0, 0), "60");
+        assert_eq!(sheet.evaluate_formula("=SUM(A3:A1)", 0, 0), "60"); // reversed range
+    }
+
+    #[test]
+    fn test_evaluate_avg() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "10".to_string());
+        sheet.set_cell(1, 0, "20".to_string());
+        sheet.set_cell(2, 0, "30".to_string());
+
+        assert_eq!(sheet.evaluate_formula("=AVG(A1:A3)", 0, 0), "20");
+        assert_eq!(sheet.evaluate_formula("=AVG(A3:A1)", 0, 0), "20"); // reversed range
+        assert_eq!(sheet.evaluate_formula("=AVG(10,20,30)", 0, 0), "20");
+        assert_eq!(sheet.evaluate_formula("=AVG(5,10)", 0, 0), "7.5");
     }
 
     #[test]
@@ -278,16 +487,19 @@ mod tests {
         let mut sheet = Spreadsheet::new();
         sheet.set_cell(0, 0, "10".to_string());
 
-        assert_eq!(sheet.evaluate_formula("=IF(A1>5,\"yes\",\"no\")"), "yes");
-        assert_eq!(sheet.evaluate_formula("=IF(A1<5,\"yes\",\"no\")"), "no");
+        assert_eq!(sheet.evaluate_formula("=IF(A1>5,\"yes\",\"no\")", 0, 0), "yes");
+        assert_eq!(sheet.evaluate_formula("=IF(A1<5,\"yes\",\"no\")", 0, 0), "no");
+        // Test single quotes
+        assert_eq!(sheet.evaluate_formula("=IF(A1>5,'yes','no')", 0, 0), "yes");
+        assert_eq!(sheet.evaluate_formula("=IF(A1<5,'yes','no')", 0, 0), "no");
     }
 
     #[test]
     fn test_arithmetic() {
-        let sheet = Spreadsheet::new();
-        assert_eq!(sheet.evaluate_formula("=1+2"), "3");
-        assert_eq!(sheet.evaluate_formula("=10-3"), "7");
-        assert_eq!(sheet.evaluate_formula("=4*5"), "20");
-        assert_eq!(sheet.evaluate_formula("=20/4"), "5");
+        let mut sheet = Spreadsheet::new();
+        assert_eq!(sheet.evaluate_formula("=1+2", 0, 0), "3");
+        assert_eq!(sheet.evaluate_formula("=10-3", 0, 0), "7");
+        assert_eq!(sheet.evaluate_formula("=4*5", 0, 0), "20");
+        assert_eq!(sheet.evaluate_formula("=20/4", 0, 0), "5");
     }
 }

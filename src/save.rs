@@ -16,6 +16,18 @@ impl Spreadsheet {
         self.save_message = None;
     }
 
+    pub fn enter_open_mode(&mut self) {
+        self.open_mode = true;
+        self.open_filename.clear();
+        self.open_message = None;
+    }
+
+    pub fn exit_open_mode(&mut self) {
+        self.open_mode = false;
+        self.open_filename.clear();
+        self.open_message = None;
+    }
+
     pub fn get_data_bounds(&self) -> (usize, usize) {
         let mut max_row = 0;
         let mut max_col = 0;

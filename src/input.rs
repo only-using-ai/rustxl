@@ -5,32 +5,55 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 
 use crate::constants::COLOR_PALETTE;
 use crate::spreadsheet::Spreadsheet;
-use crate::types::{SaveFormat, VisualSubMode};
+use crate::types::{RowColumnSelectMode, SaveFormat, TextAlignment, VerticalAlignment, VisualSubMode};
 use crate::ui;
 
-pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
-    let mut spreadsheet = Spreadsheet::new();
+pub fn run_app(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    mut spreadsheet: Spreadsheet,
+) -> io::Result<()> {
 
     loop {
         terminal.draw(|f| ui::render(f, &mut spreadsheet))?;
 
-        if let Event::Key(key) = event::read()? {
-            if key.kind != KeyEventKind::Press {
-                continue;
-            }
-
-            if spreadsheet.editing {
-                handle_editing_mode(&mut spreadsheet, key.code, key.modifiers);
-            } else if spreadsheet.save_mode {
-                if handle_save_mode(&mut spreadsheet, key.code) {
+        match event::read() {
+            Ok(Event::Key(key)) => {
+                if key.kind != KeyEventKind::Press {
                     continue;
                 }
-            } else if spreadsheet.visual_mode {
-                handle_visual_mode(&mut spreadsheet, key.code);
-            } else {
-                if handle_ready_mode(&mut spreadsheet, key.code, key.modifiers) {
-                    return Ok(());
+
+                if spreadsheet.editing {
+                    handle_editing_mode(&mut spreadsheet, key.code, key.modifiers);
+                } else if spreadsheet.open_mode {
+                    if handle_open_mode(&mut spreadsheet, key.code) {
+                        continue;
+                    }
+                } else if spreadsheet.save_mode {
+                    if handle_save_mode(&mut spreadsheet, key.code) {
+                        continue;
+                    }
+                } else if spreadsheet.visual_mode {
+                    handle_visual_mode(&mut spreadsheet, key.code);
+                } else if spreadsheet.row_column_select_mode != RowColumnSelectMode::None {
+                    handle_row_column_select_mode(&mut spreadsheet, key.code, key.modifiers);
+                } else {
+                    if handle_ready_mode(&mut spreadsheet, key.code, key.modifiers) {
+                        return Ok(());
+                    }
                 }
+            }
+            Ok(_) => {} // Ignore non-key events
+            Err(e) => {
+                // If we can't read events, it might be a terminal issue
+                // Try to restore terminal and exit gracefully
+                let _ = crossterm::terminal::disable_raw_mode();
+                let _ = crossterm::execute!(
+                    terminal.backend_mut(),
+                    crossterm::terminal::LeaveAlternateScreen,
+                    crossterm::event::DisableMouseCapture
+                );
+                let _ = terminal.show_cursor();
+                return Err(e);
             }
         }
     }
@@ -90,6 +113,35 @@ fn handle_normal_editing(spreadsheet: &mut Spreadsheet, code: KeyCode) {
     }
 }
 
+fn handle_open_mode(spreadsheet: &mut Spreadsheet, code: KeyCode) -> bool {
+    match code {
+        KeyCode::Char(c) if c.is_alphanumeric() || c == '_' || c == '-' || c == '/' || c == '.' || c == '~' || c == ' ' => {
+            spreadsheet.open_filename.push(c);
+            spreadsheet.open_message = None;
+        }
+        KeyCode::Backspace => {
+            spreadsheet.open_filename.pop();
+            spreadsheet.open_message = None;
+        }
+        KeyCode::Enter => {
+            if spreadsheet.open_filename.is_empty() {
+                spreadsheet.open_message = Some("Filename cannot be empty".to_string());
+            } else {
+                let filename = spreadsheet.open_filename.clone();
+                if let Err(e) = spreadsheet.load_from_file(&filename) {
+                    spreadsheet.open_message = Some(format!("Error: {}", e));
+                } else {
+                    spreadsheet.open_message = Some(format!("Loaded {}", filename));
+                    spreadsheet.exit_open_mode();
+                }
+            }
+        }
+        KeyCode::Esc => spreadsheet.exit_open_mode(),
+        _ => {}
+    }
+    false
+}
+
 fn handle_save_mode(spreadsheet: &mut Spreadsheet, code: KeyCode) -> bool {
     match code {
         KeyCode::Char('1') => spreadsheet.save_format = SaveFormat::Csv,
@@ -122,6 +174,8 @@ fn handle_visual_mode(spreadsheet: &mut Spreadsheet, code: KeyCode) {
         VisualSubMode::BackgroundColor => handle_visual_bg_color(spreadsheet, code),
         VisualSubMode::ColumnWidth => handle_visual_column_width(spreadsheet, code),
         VisualSubMode::RowHeight => handle_visual_row_height(spreadsheet, code),
+        VisualSubMode::TextAlignment => handle_visual_text_alignment(spreadsheet, code),
+        VisualSubMode::VerticalAlignment => handle_visual_vertical_alignment(spreadsheet, code),
     }
 }
 
@@ -132,6 +186,12 @@ fn handle_visual_main(spreadsheet: &mut Spreadsheet, code: KeyCode) {
         }
         KeyCode::Char('b') | KeyCode::Char('B') => {
             spreadsheet.visual_sub_mode = VisualSubMode::BackgroundColor;
+        }
+        KeyCode::Char('a') | KeyCode::Char('A') => {
+            spreadsheet.visual_sub_mode = VisualSubMode::TextAlignment;
+        }
+        KeyCode::Char('v') | KeyCode::Char('V') => {
+            spreadsheet.visual_sub_mode = VisualSubMode::VerticalAlignment;
         }
         KeyCode::Char('w') | KeyCode::Char('W') => {
             spreadsheet.visual_sub_mode = VisualSubMode::ColumnWidth;
@@ -211,6 +271,52 @@ fn handle_visual_row_height(spreadsheet: &mut Spreadsheet, code: KeyCode) {
     }
 }
 
+fn handle_visual_text_alignment(spreadsheet: &mut Spreadsheet, code: KeyCode) {
+    match code {
+        KeyCode::Char('1') => {
+            spreadsheet.apply_alignment_to_selection(Some(TextAlignment::Left));
+            spreadsheet.visual_sub_mode = VisualSubMode::Main;
+        }
+        KeyCode::Char('2') => {
+            spreadsheet.apply_alignment_to_selection(Some(TextAlignment::Center));
+            spreadsheet.visual_sub_mode = VisualSubMode::Main;
+        }
+        KeyCode::Char('3') => {
+            spreadsheet.apply_alignment_to_selection(Some(TextAlignment::Right));
+            spreadsheet.visual_sub_mode = VisualSubMode::Main;
+        }
+        KeyCode::Char('0') => {
+            spreadsheet.apply_alignment_to_selection(None);
+            spreadsheet.visual_sub_mode = VisualSubMode::Main;
+        }
+        KeyCode::Esc => spreadsheet.visual_sub_mode = VisualSubMode::Main,
+        _ => {}
+    }
+}
+
+fn handle_visual_vertical_alignment(spreadsheet: &mut Spreadsheet, code: KeyCode) {
+    match code {
+        KeyCode::Char('1') => {
+            spreadsheet.apply_vertical_alignment_to_selection(Some(VerticalAlignment::Top));
+            spreadsheet.visual_sub_mode = VisualSubMode::Main;
+        }
+        KeyCode::Char('2') => {
+            spreadsheet.apply_vertical_alignment_to_selection(Some(VerticalAlignment::Center));
+            spreadsheet.visual_sub_mode = VisualSubMode::Main;
+        }
+        KeyCode::Char('3') => {
+            spreadsheet.apply_vertical_alignment_to_selection(Some(VerticalAlignment::Bottom));
+            spreadsheet.visual_sub_mode = VisualSubMode::Main;
+        }
+        KeyCode::Char('0') => {
+            spreadsheet.apply_vertical_alignment_to_selection(None);
+            spreadsheet.visual_sub_mode = VisualSubMode::Main;
+        }
+        KeyCode::Esc => spreadsheet.visual_sub_mode = VisualSubMode::Main,
+        _ => {}
+    }
+}
+
 fn handle_ready_mode(
     spreadsheet: &mut Spreadsheet,
     code: KeyCode,
@@ -219,7 +325,15 @@ fn handle_ready_mode(
     let shift = modifiers.contains(KeyModifiers::SHIFT);
     match code {
         KeyCode::Char('q') | KeyCode::Char('Q') => return true,
+        KeyCode::Char('o') | KeyCode::Char('O') => spreadsheet.enter_open_mode(),
         KeyCode::Char('s') | KeyCode::Char('S') => spreadsheet.enter_save_mode(),
+        KeyCode::Char('t') | KeyCode::Char('T') => spreadsheet.format_as_table(),
+        KeyCode::Char('r') | KeyCode::Char('R') if shift => {
+            spreadsheet.enter_row_select_mode();
+        }
+        KeyCode::Char('c') | KeyCode::Char('C') if shift => {
+            spreadsheet.enter_column_select_mode();
+        }
         KeyCode::Up => spreadsheet.move_cursor(-1, 0, shift),
         KeyCode::Down => spreadsheet.move_cursor(1, 0, shift),
         KeyCode::Left => spreadsheet.move_cursor(0, -1, shift),
@@ -239,6 +353,120 @@ fn handle_ready_mode(
         _ => {}
     }
     false
+}
+
+fn handle_row_column_select_mode(
+    spreadsheet: &mut Spreadsheet,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) {
+    let shift = modifiers.contains(KeyModifiers::SHIFT);
+    
+    match spreadsheet.row_column_select_mode {
+        RowColumnSelectMode::RowSelect => {
+            match code {
+                KeyCode::Up => {
+                    if shift {
+                        // Extend selection up
+                        if let Some((min_row, max_row)) = spreadsheet.selected_rows {
+                            if spreadsheet.cursor_row > 0 {
+                                spreadsheet.cursor_row -= 1;
+                                spreadsheet.selected_rows = Some((
+                                    spreadsheet.cursor_row.min(min_row),
+                                    spreadsheet.cursor_row.max(max_row),
+                                ));
+                            }
+                        }
+                    } else {
+                        // Move cursor up
+                        if spreadsheet.cursor_row > 0 {
+                            spreadsheet.cursor_row -= 1;
+                            spreadsheet.selected_rows = Some((spreadsheet.cursor_row, spreadsheet.cursor_row));
+                        }
+                    }
+                }
+                KeyCode::Down => {
+                    if shift {
+                        // Extend selection down
+                        if let Some((min_row, max_row)) = spreadsheet.selected_rows {
+                            if spreadsheet.cursor_row < spreadsheet.num_rows - 1 {
+                                spreadsheet.cursor_row += 1;
+                                spreadsheet.selected_rows = Some((
+                                    spreadsheet.cursor_row.min(min_row),
+                                    spreadsheet.cursor_row.max(max_row),
+                                ));
+                            }
+                        }
+                    } else {
+                        // Move cursor down
+                        if spreadsheet.cursor_row < spreadsheet.num_rows - 1 {
+                            spreadsheet.cursor_row += 1;
+                            spreadsheet.selected_rows = Some((spreadsheet.cursor_row, spreadsheet.cursor_row));
+                        }
+                    }
+                }
+                KeyCode::Char('d') | KeyCode::Char('D') => {
+                    spreadsheet.delete_selected_rows();
+                }
+                KeyCode::Esc => {
+                    spreadsheet.exit_row_column_select_mode();
+                }
+                _ => {}
+            }
+        }
+        RowColumnSelectMode::ColumnSelect => {
+            match code {
+                KeyCode::Left => {
+                    if shift {
+                        // Extend selection left
+                        if let Some((min_col, max_col)) = spreadsheet.selected_cols {
+                            if spreadsheet.cursor_col > 0 {
+                                spreadsheet.cursor_col -= 1;
+                                spreadsheet.selected_cols = Some((
+                                    spreadsheet.cursor_col.min(min_col),
+                                    spreadsheet.cursor_col.max(max_col),
+                                ));
+                            }
+                        }
+                    } else {
+                        // Move cursor left
+                        if spreadsheet.cursor_col > 0 {
+                            spreadsheet.cursor_col -= 1;
+                            spreadsheet.selected_cols = Some((spreadsheet.cursor_col, spreadsheet.cursor_col));
+                        }
+                    }
+                }
+                KeyCode::Right => {
+                    if shift {
+                        // Extend selection right
+                        if let Some((min_col, max_col)) = spreadsheet.selected_cols {
+                            if spreadsheet.cursor_col < spreadsheet.num_cols - 1 {
+                                spreadsheet.cursor_col += 1;
+                                spreadsheet.selected_cols = Some((
+                                    spreadsheet.cursor_col.min(min_col),
+                                    spreadsheet.cursor_col.max(max_col),
+                                ));
+                            }
+                        }
+                    } else {
+                        // Move cursor right
+                        if spreadsheet.cursor_col < spreadsheet.num_cols - 1 {
+                            spreadsheet.cursor_col += 1;
+                            spreadsheet.selected_cols = Some((spreadsheet.cursor_col, spreadsheet.cursor_col));
+                        }
+                    }
+                }
+                KeyCode::Char('d') | KeyCode::Char('D') => {
+                    spreadsheet.delete_selected_columns();
+                }
+                KeyCode::Esc => {
+                    spreadsheet.exit_row_column_select_mode();
+                }
+                _ => {}
+            }
+        }
+        RowColumnSelectMode::None => {}
+    }
 }
 
 #[cfg(test)]
