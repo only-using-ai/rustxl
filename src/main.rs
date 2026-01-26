@@ -2,6 +2,7 @@ mod constants;
 mod formula;
 mod input;
 mod save;
+mod settings;
 mod spreadsheet;
 mod style;
 mod types;
@@ -36,36 +37,6 @@ fn read_piped_stdin() -> io::Result<Option<Vec<u8>>> {
     let mut buffer = Vec::new();
     io::stdin().read_to_end(&mut buffer)?;
     Ok(Some(buffer))
-}
-
-/// Redirects stdin (fd 0) to /dev/tty so that crossterm can read keyboard
-/// events from the terminal even when the original stdin was a pipe.
-#[cfg(unix)]
-fn redirect_stdin_to_tty() -> io::Result<()> {
-    use std::fs::File;
-    use std::os::unix::io::AsRawFd;
-    
-    // Open /dev/tty to get a direct connection to the terminal
-    let tty = File::open("/dev/tty").map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            format!("Failed to open /dev/tty for keyboard input: {}. Cannot run interactively when stdin is piped.", e)
-        )
-    })?;
-    
-    // Duplicate the tty file descriptor to stdin (fd 0)
-    // This allows crossterm to read keyboard events from the terminal
-    unsafe {
-        let tty_fd = tty.as_raw_fd();
-        if libc::dup2(tty_fd, 0) == -1 {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("Failed to redirect stdin to /dev/tty: {}", io::Error::last_os_error())
-            ));
-        }
-    }
-    // tty File is dropped here, but fd 0 now points to /dev/tty
-    Ok(())
 }
 
 /// Tests for piped stdin handling
@@ -114,17 +85,9 @@ fn main() -> io::Result<()> {
     let args = Args::parse();
 
     // CRITICAL: Read all piped data from stdin FIRST, before any terminal setup.
-    // Once we redirect stdin to /dev/tty, we can't read from the pipe anymore.
+    // The use-dev-tty feature makes crossterm read from /dev/tty directly,
+    // but we still need to consume the piped data before it's lost.
     let piped_data = read_piped_stdin()?;
-    let stdin_was_piped = piped_data.is_some();
-    
-    // If stdin was piped, redirect it to /dev/tty BEFORE any crossterm calls.
-    // This must happen before enable_raw_mode() or any other crossterm function
-    // that might initialize the internal event reader.
-    #[cfg(unix)]
-    if stdin_was_piped {
-        redirect_stdin_to_tty()?;
-    }
     
     // Check if stdout is a TTY (required for terminal UI)
     if !atty::is(atty::Stream::Stdout) {
@@ -133,8 +96,12 @@ fn main() -> io::Result<()> {
         std::process::exit(1);
     }
     
+    // Load settings
+    let settings = settings::Settings::load();
+    
     // Now create and populate the spreadsheet
     let mut spreadsheet = crate::spreadsheet::Spreadsheet::new();
+    spreadsheet.dark_mode = settings.dark_mode;
     
     if let Some(data) = piped_data {
         // Load data from the buffer we read earlier

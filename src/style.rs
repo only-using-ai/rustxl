@@ -242,6 +242,18 @@ impl Spreadsheet {
             self.cell_styles.remove(&(self.cursor_row, self.cursor_col));
         }
     }
+
+    pub fn apply_bold_to_selection(&mut self, bold: bool) {
+        if let Some(((min_row, min_col), (max_row, max_col))) = self.get_selection_range() {
+            for row in min_row..=max_row {
+                for col in min_col..=max_col {
+                    self.set_cell_bold(row, col, bold);
+                }
+            }
+        } else {
+            self.set_cell_bold(self.cursor_row, self.cursor_col, bold);
+        }
+    }
 }
 
 #[cfg(test)]

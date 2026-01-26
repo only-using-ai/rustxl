@@ -7,8 +7,11 @@ use ratatui::{
 };
 
 use crate::constants::{
-    CELL_NAME_BG, FORMULA_BAR_BG, FORMULA_BG, GRID_COLOR, HEADER_BG, HEADER_FG,
-    REF_RANGE_BG, REF_SELECTION_BG, SELECTED_BG, SELECTED_HEADER_BG,
+    CELL_BG, CELL_FG, CELL_NAME_BG, FORMULA_BAR_BG, FORMULA_BG, GRID_COLOR, HEADER_BG, HEADER_FG,
+    REF_RANGE_BG, REF_SELECTION_BG, SELECTED_BG, SELECTED_HEADER_BG, FIND_MATCH_BG,
+    DARK_CELL_BG, DARK_CELL_FG, DARK_CELL_NAME_BG, DARK_FORMULA_BAR_BG, DARK_FORMULA_BG,
+    DARK_GRID_COLOR, DARK_HEADER_BG, DARK_HEADER_FG, DARK_REF_RANGE_BG, DARK_REF_SELECTION_BG,
+    DARK_SELECTED_BG, DARK_SELECTED_HEADER_BG, DARK_FIND_MATCH_BG,
 };
 use crate::spreadsheet::Spreadsheet;
 use crate::types::{RowColumnSelectMode, SaveFormat, TextAlignment, VerticalAlignment, VisualSubMode};
@@ -16,16 +19,33 @@ use crate::types::{RowColumnSelectMode, SaveFormat, TextAlignment, VerticalAlign
 pub fn render(f: &mut Frame, spreadsheet: &mut Spreadsheet) {
     let area = f.area();
 
-    let chunks = Layout::vertical([
-        Constraint::Length(3),
-        Constraint::Min(5),
-        Constraint::Length(1),
-    ])
-    .split(area);
+    // Check if we have selection stats to show
+    let has_stats = spreadsheet.get_selection_stats().is_some();
+
+    let chunks = if has_stats {
+        Layout::vertical([
+            Constraint::Length(3),
+            Constraint::Min(5),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(area)
+    } else {
+        Layout::vertical([
+            Constraint::Length(3),
+            Constraint::Min(5),
+            Constraint::Length(1),
+        ])
+        .split(area)
+    };
 
     let formula_bar_area = chunks[0];
     let grid_area = chunks[1];
-    let status_area = chunks[2];
+    let (stats_area, status_area) = if has_stats {
+        (Some(chunks[2]), chunks[3])
+    } else {
+        (None, chunks[2])
+    };
 
     spreadsheet.adjust_scroll(grid_area);
 
@@ -34,6 +54,9 @@ pub fn render(f: &mut Frame, spreadsheet: &mut Spreadsheet) {
 
     render_formula_bar(f, spreadsheet, formula_bar_area);
     render_grid(f, spreadsheet, grid_area, visible_cols, visible_rows);
+    if let Some(stats_area) = stats_area {
+        render_stats_bar(f, spreadsheet, stats_area);
+    }
     render_status_bar(f, spreadsheet, status_area);
 }
 
@@ -43,6 +66,13 @@ fn render_formula_bar(f: &mut Frame, spreadsheet: &Spreadsheet, area: Rect) {
         spreadsheet.edit_buffer.clone()
     } else {
         cell_content.to_string()
+    };
+
+    // Choose colors based on dark mode
+    let (formula_bar_bg, cell_name_bg, formula_bg, grid_color, text_fg) = if spreadsheet.dark_mode {
+        (DARK_FORMULA_BAR_BG, DARK_CELL_NAME_BG, DARK_FORMULA_BG, DARK_GRID_COLOR, DARK_CELL_FG)
+    } else {
+        (FORMULA_BAR_BG, CELL_NAME_BG, FORMULA_BG, GRID_COLOR, CELL_FG)
     };
 
     let cell_name_width = 12;
@@ -60,16 +90,16 @@ fn render_formula_bar(f: &mut Frame, spreadsheet: &Spreadsheet, area: Rect) {
 
     let formula_bar_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(GRID_COLOR))
-        .style(Style::default().bg(FORMULA_BAR_BG));
+        .border_style(Style::default().fg(grid_color))
+        .style(Style::default().bg(formula_bar_bg));
     f.render_widget(formula_bar_block, area);
 
     let cell_name = Paragraph::new(spreadsheet.selection_ref())
-        .style(Style::default().bg(CELL_NAME_BG).fg(Color::Black))
+        .style(Style::default().bg(cell_name_bg).fg(text_fg))
         .alignment(Alignment::Center);
     f.render_widget(cell_name, formula_bar_inner[0]);
 
-    let sep = Paragraph::new("│").style(Style::default().fg(GRID_COLOR).bg(FORMULA_BAR_BG));
+    let sep = Paragraph::new("│").style(Style::default().fg(grid_color).bg(formula_bar_bg));
     f.render_widget(sep, formula_bar_inner[1]);
 
     let formula_display = if spreadsheet.editing {
@@ -78,7 +108,7 @@ fn render_formula_bar(f: &mut Frame, spreadsheet: &Spreadsheet, area: Rect) {
         format!(" {}", display_content)
     };
     let formula = Paragraph::new(formula_display)
-        .style(Style::default().bg(FORMULA_BG).fg(Color::Black));
+        .style(Style::default().bg(formula_bg).fg(text_fg));
     f.render_widget(formula, formula_bar_inner[2]);
 }
 
@@ -89,7 +119,17 @@ fn render_grid(
     visible_cols: usize,
     visible_rows: usize,
 ) {
-    let mut header_cells = vec![Cell::from("").style(Style::default().bg(HEADER_BG))];
+    // Choose colors based on dark mode
+    let (header_bg, header_fg, selected_header_bg, selected_bg, grid_color, cell_bg, cell_fg, ref_selection_bg, ref_range_bg, find_match_bg) = 
+        if spreadsheet.dark_mode {
+            (DARK_HEADER_BG, DARK_HEADER_FG, DARK_SELECTED_HEADER_BG, DARK_SELECTED_BG, 
+             DARK_GRID_COLOR, DARK_CELL_BG, DARK_CELL_FG, DARK_REF_SELECTION_BG, DARK_REF_RANGE_BG, DARK_FIND_MATCH_BG)
+        } else {
+            (HEADER_BG, HEADER_FG, SELECTED_HEADER_BG, SELECTED_BG,
+             GRID_COLOR, CELL_BG, CELL_FG, REF_SELECTION_BG, REF_RANGE_BG, FIND_MATCH_BG)
+        };
+
+    let mut header_cells = vec![Cell::from("").style(Style::default().bg(header_bg))];
     for col in spreadsheet.scroll_col..spreadsheet.scroll_col + visible_cols {
         if col < spreadsheet.num_cols {
             let is_current_col = if spreadsheet.selecting_ref {
@@ -103,15 +143,15 @@ fn render_grid(
                 false
             };
             let bg = if is_current_col || is_selected_col { 
-                SELECTED_HEADER_BG 
+                selected_header_bg 
             } else { 
-                HEADER_BG 
+                header_bg 
             };
             header_cells.push(
                 Cell::from(Spreadsheet::col_name(col)).style(
                     Style::default()
                         .bg(bg)
-                        .fg(HEADER_FG)
+                        .fg(header_fg)
                         .add_modifier(Modifier::BOLD),
                 ),
             );
@@ -136,15 +176,15 @@ fn render_grid(
             false
         };
         let row_header_bg = if is_current_row || is_selected_row { 
-            SELECTED_HEADER_BG 
+            selected_header_bg 
         } else { 
-            HEADER_BG 
+            header_bg 
         };
 
         let mut row_cells = vec![Cell::from(format!("{}", row + 1)).style(
             Style::default()
                 .bg(row_header_bg)
-                .fg(HEADER_FG)
+                .fg(header_fg)
                 .add_modifier(Modifier::BOLD),
         )];
 
@@ -161,7 +201,7 @@ fn render_grid(
                 // Evaluate cell - this may modify the spreadsheet for SHELL formulas
                 spreadsheet.evaluate_cell(row, col)
             };
-            let content = if is_cursor && spreadsheet.editing && !spreadsheet.selecting_ref {
+            let content = if is_cursor && spreadsheet.editing {
                 format!("{}_", spreadsheet.edit_buffer)
             } else {
                 evaluated.clone()
@@ -286,33 +326,41 @@ fn render_grid(
                 }
             };
 
-            // Use explicit foreground color if set, otherwise default to pure black
-            let fg_color = cell_style.fg.unwrap_or(Color::Rgb(0, 0, 0));
+            // Use explicit foreground color if set, otherwise default based on dark mode
+            let fg_color = cell_style.fg.unwrap_or(cell_fg);
+            
+            // Check if this cell is a find match (but not the cursor)
+            let is_find_match = spreadsheet.is_find_match(row, col);
             
             let mut style = if is_cursor && !spreadsheet.selecting_ref {
                 Style::default()
-                    .bg(SELECTED_BG)
+                    .bg(selected_bg)
                     .fg(fg_color)
             } else if is_ref_cursor {
                 Style::default()
-                    .bg(REF_SELECTION_BG)
+                    .bg(ref_selection_bg)
                     .fg(fg_color)
             } else if is_in_ref_range {
                 Style::default()
-                    .bg(REF_RANGE_BG)
+                    .bg(ref_range_bg)
                     .fg(fg_color)
             } else if is_in_selected_row || is_in_selected_col {
                 // Highlight selected rows or columns
                 Style::default()
-                    .bg(SELECTED_BG)
+                    .bg(selected_bg)
                     .fg(fg_color)
             } else if is_in_selection {
                 Style::default()
-                    .bg(SELECTED_BG)
+                    .bg(selected_bg)
                     .fg(fg_color)
+            } else if is_find_match {
+                // Highlight find matches with light yellow background
+                Style::default()
+                    .bg(find_match_bg)
+                    .fg(Color::Black) // Use black text for visibility on yellow
             } else {
                 Style::default()
-                    .bg(cell_style.bg.unwrap_or(Color::White))
+                    .bg(cell_style.bg.unwrap_or(cell_bg))
                     .fg(fg_color)
             };
             
@@ -338,11 +386,49 @@ fn render_grid(
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(GRID_COLOR))
-                .style(Style::default().bg(Color::White)),
+                .border_style(Style::default().fg(grid_color))
+                .style(Style::default().bg(cell_bg)),
         );
 
     f.render_widget(table, area);
+}
+
+fn render_stats_bar(f: &mut Frame, spreadsheet: &mut Spreadsheet, area: Rect) {
+    if let Some((row_count, cell_count, numeric_count, sum)) = spreadsheet.get_selection_stats() {
+        let mut spans = vec![
+            Span::styled("  Rows: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{}", row_count), Style::default().fg(Color::White)),
+            Span::styled("  Cells: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{}", cell_count), Style::default().fg(Color::White)),
+        ];
+
+        if numeric_count > 0 {
+            spans.push(Span::styled("  Sum: ", Style::default().fg(Color::DarkGray)));
+            // Format sum nicely - remove trailing zeros for integers
+            let sum_str = if sum.fract() == 0.0 {
+                format!("{:.0}", sum)
+            } else {
+                format!("{}", sum)
+            };
+            spans.push(Span::styled(sum_str, Style::default().fg(Color::Cyan)));
+            
+            // Also show average
+            let avg = sum / numeric_count as f64;
+            spans.push(Span::styled("  Avg: ", Style::default().fg(Color::DarkGray)));
+            let avg_str = if avg.fract() == 0.0 {
+                format!("{:.0}", avg)
+            } else {
+                format!("{:.2}", avg)
+            };
+            spans.push(Span::styled(avg_str, Style::default().fg(Color::Cyan)));
+        }
+
+        let stats_line = Line::from(spans);
+        f.render_widget(
+            Paragraph::new(stats_line).style(Style::default().bg(Color::Rgb(35, 35, 35))),
+            area,
+        );
+    }
 }
 
 fn render_status_bar(f: &mut Frame, spreadsheet: &Spreadsheet, area: Rect) {
@@ -355,6 +441,11 @@ fn render_status_bar(f: &mut Frame, spreadsheet: &Spreadsheet, area: Rect) {
         (
             " SAVE ",
             Style::default().bg(Color::Rgb(220, 20, 60)).fg(Color::White),
+        )
+    } else if spreadsheet.find_mode {
+        (
+            " FIND ",
+            Style::default().bg(Color::Rgb(255, 200, 0)).fg(Color::Black),
         )
     } else if spreadsheet.row_column_select_mode == RowColumnSelectMode::RowSelect {
         (
@@ -392,6 +483,8 @@ fn render_status_bar(f: &mut Frame, spreadsheet: &Spreadsheet, area: Rect) {
         render_open_status(spreadsheet, mode, mode_style)
     } else if spreadsheet.save_mode {
         render_save_status(spreadsheet, mode, mode_style)
+    } else if spreadsheet.find_mode {
+        render_find_status(spreadsheet, mode, mode_style)
     } else if spreadsheet.row_column_select_mode == RowColumnSelectMode::RowSelect {
         render_row_select_status(spreadsheet, mode, mode_style)
     } else if spreadsheet.row_column_select_mode == RowColumnSelectMode::ColumnSelect {
@@ -408,6 +501,33 @@ fn render_status_bar(f: &mut Frame, spreadsheet: &Spreadsheet, area: Rect) {
         Paragraph::new(status).style(Style::default().bg(Color::Rgb(45, 45, 45))),
         area,
     );
+}
+
+fn render_find_status<'a>(spreadsheet: &Spreadsheet, mode: &'a str, mode_style: Style) -> Line<'a> {
+    let match_count = spreadsheet.find_matches.len();
+    let match_info = if match_count == 0 {
+        "No matches".to_string()
+    } else if match_count == 1 {
+        "1 match".to_string()
+    } else {
+        format!("{} matches", match_count)
+    };
+    
+    Line::from(vec![
+        Span::styled(mode, mode_style),
+        Span::styled("  Search: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("{}_", spreadsheet.find_query),
+            Style::default().fg(Color::White),
+        ),
+        Span::styled("  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(match_info, Style::default().fg(Color::Cyan)),
+        Span::styled("  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Enter", Style::default().fg(Color::Yellow)),
+        Span::styled(" confirm  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Esc", Style::default().fg(Color::Yellow)),
+        Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+    ])
 }
 
 fn render_open_status<'a>(spreadsheet: &Spreadsheet, mode: &'a str, mode_style: Style) -> Line<'a> {
@@ -479,25 +599,32 @@ fn render_visual_status<'a>(
     mode_style: Style,
 ) -> Line<'a> {
     match spreadsheet.visual_sub_mode {
-        VisualSubMode::Main => Line::from(vec![
-            Span::styled(mode, mode_style),
-            Span::styled("  f", Style::default().fg(Color::White)),
-            Span::styled(" Text  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("b", Style::default().fg(Color::White)),
-            Span::styled(" Bg  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("a", Style::default().fg(Color::White)),
-            Span::styled(" Align  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("v", Style::default().fg(Color::White)),
-            Span::styled(" VAlign  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("w", Style::default().fg(Color::White)),
-            Span::styled(" Width  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("h", Style::default().fg(Color::White)),
-            Span::styled(" Height  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("c", Style::default().fg(Color::White)),
-            Span::styled(" Clear  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("Esc", Style::default().fg(Color::White)),
-            Span::styled(" Exit", Style::default().fg(Color::DarkGray)),
-        ]),
+        VisualSubMode::Main => {
+            let mode_label = if spreadsheet.dark_mode { "Dark" } else { "Light" };
+            Line::from(vec![
+                Span::styled(mode, mode_style),
+                Span::styled("  f", Style::default().fg(Color::White)),
+                Span::styled(" Text  ", Style::default().fg(Color::DarkGray)),
+                Span::styled("b", Style::default().fg(Color::White)),
+                Span::styled(" Bg  ", Style::default().fg(Color::DarkGray)),
+                Span::styled("s", Style::default().fg(Color::White)),
+                Span::styled(" Size  ", Style::default().fg(Color::DarkGray)),
+                Span::styled("a", Style::default().fg(Color::White)),
+                Span::styled(" Align  ", Style::default().fg(Color::DarkGray)),
+                Span::styled("v", Style::default().fg(Color::White)),
+                Span::styled(" VAlign  ", Style::default().fg(Color::DarkGray)),
+                Span::styled("w", Style::default().fg(Color::White)),
+                Span::styled(" Width  ", Style::default().fg(Color::DarkGray)),
+                Span::styled("h", Style::default().fg(Color::White)),
+                Span::styled(" Height  ", Style::default().fg(Color::DarkGray)),
+                Span::styled("c", Style::default().fg(Color::White)),
+                Span::styled(" Clear  ", Style::default().fg(Color::DarkGray)),
+                Span::styled("m", Style::default().fg(Color::White)),
+                Span::styled(format!(" {} ", mode_label), Style::default().fg(Color::DarkGray)),
+                Span::styled("Esc", Style::default().fg(Color::White)),
+                Span::styled(" Exit", Style::default().fg(Color::DarkGray)),
+            ])
+        }
         VisualSubMode::TextColor | VisualSubMode::BackgroundColor => {
             let label = if spreadsheet.visual_sub_mode == VisualSubMode::TextColor {
                 "Text Color: "
@@ -575,6 +702,16 @@ fn render_visual_status<'a>(
             Span::styled("Esc", Style::default().fg(Color::White)),
             Span::styled(" Back", Style::default().fg(Color::DarkGray)),
         ]),
+        VisualSubMode::FontSize => Line::from(vec![
+            Span::styled(mode, mode_style),
+            Span::styled("  Font Size: ", Style::default().fg(Color::DarkGray)),
+            Span::styled("+/↑", Style::default().fg(Color::White)),
+            Span::styled(" Increase (Bold)  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("-/↓", Style::default().fg(Color::White)),
+            Span::styled(" Decrease (Normal)  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Esc", Style::default().fg(Color::White)),
+            Span::styled(" Back", Style::default().fg(Color::DarkGray)),
+        ]),
     }
 }
 
@@ -614,6 +751,8 @@ fn render_row_select_status<'a>(
         Span::styled(" Extend  ", Style::default().fg(Color::DarkGray)),
         Span::styled("d", Style::default().fg(Color::White)),
         Span::styled(" Delete  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("i", Style::default().fg(Color::White)),
+        Span::styled(" Insert  ", Style::default().fg(Color::DarkGray)),
         Span::styled("Esc", Style::default().fg(Color::White)),
         Span::styled(" Exit", Style::default().fg(Color::DarkGray)),
     ])
@@ -644,6 +783,8 @@ fn render_column_select_status<'a>(
         Span::styled(" Extend  ", Style::default().fg(Color::DarkGray)),
         Span::styled("d", Style::default().fg(Color::White)),
         Span::styled(" Delete  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("i", Style::default().fg(Color::White)),
+        Span::styled(" Insert  ", Style::default().fg(Color::DarkGray)),
         Span::styled("Esc", Style::default().fg(Color::White)),
         Span::styled(" Exit", Style::default().fg(Color::DarkGray)),
     ])
@@ -655,6 +796,8 @@ fn render_ready_status<'a>(mode: &'a str, mode_style: Style) -> Line<'a> {
         Span::styled("  ←↑↓→ Navigate  ", Style::default().fg(Color::DarkGray)),
         Span::styled("Enter", Style::default().fg(Color::White)),
         Span::styled(" Edit  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("f", Style::default().fg(Color::White)),
+        Span::styled(" Find  ", Style::default().fg(Color::DarkGray)),
         Span::styled("Tab", Style::default().fg(Color::White)),
         Span::styled(" Visual  ", Style::default().fg(Color::DarkGray)),
         Span::styled("Shift+R", Style::default().fg(Color::White)),

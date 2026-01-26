@@ -34,6 +34,7 @@ pub enum VisualSubMode {
     RowHeight,
     TextAlignment,
     VerticalAlignment,
+    FontSize,
 }
 
 #[derive(Clone, Copy, PartialEq)]

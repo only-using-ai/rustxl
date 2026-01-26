@@ -36,6 +36,8 @@ pub fn run_app(
                     handle_visual_mode(&mut spreadsheet, key.code);
                 } else if spreadsheet.row_column_select_mode != RowColumnSelectMode::None {
                     handle_row_column_select_mode(&mut spreadsheet, key.code, key.modifiers);
+                } else if spreadsheet.find_mode {
+                    handle_find_mode(&mut spreadsheet, key.code, key.modifiers);
                 } else {
                     if handle_ready_mode(&mut spreadsheet, key.code, key.modifiers) {
                         return Ok(());
@@ -176,6 +178,7 @@ fn handle_visual_mode(spreadsheet: &mut Spreadsheet, code: KeyCode) {
         VisualSubMode::RowHeight => handle_visual_row_height(spreadsheet, code),
         VisualSubMode::TextAlignment => handle_visual_text_alignment(spreadsheet, code),
         VisualSubMode::VerticalAlignment => handle_visual_vertical_alignment(spreadsheet, code),
+        VisualSubMode::FontSize => handle_visual_font_size(spreadsheet, code),
     }
 }
 
@@ -199,8 +202,14 @@ fn handle_visual_main(spreadsheet: &mut Spreadsheet, code: KeyCode) {
         KeyCode::Char('h') | KeyCode::Char('H') => {
             spreadsheet.visual_sub_mode = VisualSubMode::RowHeight;
         }
+        KeyCode::Char('s') | KeyCode::Char('S') => {
+            spreadsheet.visual_sub_mode = VisualSubMode::FontSize;
+        }
         KeyCode::Char('c') | KeyCode::Char('C') => {
             spreadsheet.clear_formatting_from_selection();
+        }
+        KeyCode::Char('m') | KeyCode::Char('M') => {
+            spreadsheet.toggle_dark_mode();
         }
         KeyCode::Esc | KeyCode::Tab => spreadsheet.exit_visual_mode(),
         _ => {}
@@ -317,17 +326,47 @@ fn handle_visual_vertical_alignment(spreadsheet: &mut Spreadsheet, code: KeyCode
     }
 }
 
+fn handle_visual_font_size(spreadsheet: &mut Spreadsheet, code: KeyCode) {
+    match code {
+        KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Up => {
+            // Increase font size = make bold
+            spreadsheet.apply_bold_to_selection(true);
+        }
+        KeyCode::Char('-') | KeyCode::Down => {
+            // Decrease font size = remove bold
+            spreadsheet.apply_bold_to_selection(false);
+        }
+        KeyCode::Esc => spreadsheet.visual_sub_mode = VisualSubMode::Main,
+        _ => {}
+    }
+}
+
 fn handle_ready_mode(
     spreadsheet: &mut Spreadsheet,
     code: KeyCode,
     modifiers: KeyModifiers,
 ) -> bool {
     let shift = modifiers.contains(KeyModifiers::SHIFT);
+    let ctrl_or_cmd = modifiers.contains(KeyModifiers::CONTROL) || modifiers.contains(KeyModifiers::SUPER);
+    
     match code {
+        // Copy (Ctrl+C / Cmd+C)
+        KeyCode::Char('c') if ctrl_or_cmd => {
+            spreadsheet.copy_selection();
+        }
+        // Cut (Ctrl+X / Cmd+X)
+        KeyCode::Char('x') if ctrl_or_cmd => {
+            spreadsheet.cut_selection();
+        }
+        // Paste (Ctrl+V / Cmd+V)
+        KeyCode::Char('v') if ctrl_or_cmd => {
+            spreadsheet.paste();
+        }
         KeyCode::Char('q') | KeyCode::Char('Q') => return true,
         KeyCode::Char('o') | KeyCode::Char('O') => spreadsheet.enter_open_mode(),
         KeyCode::Char('s') | KeyCode::Char('S') => spreadsheet.enter_save_mode(),
         KeyCode::Char('t') | KeyCode::Char('T') => spreadsheet.format_as_table(),
+        KeyCode::Char('f') | KeyCode::Char('F') => spreadsheet.enter_find_mode(),
         KeyCode::Char('r') | KeyCode::Char('R') if shift => {
             spreadsheet.enter_row_select_mode();
         }
@@ -358,55 +397,52 @@ fn handle_ready_mode(
 fn handle_row_column_select_mode(
     spreadsheet: &mut Spreadsheet,
     code: KeyCode,
-    modifiers: KeyModifiers,
+    _modifiers: KeyModifiers,
 ) {
-    let shift = modifiers.contains(KeyModifiers::SHIFT);
-    
     match spreadsheet.row_column_select_mode {
         RowColumnSelectMode::RowSelect => {
             match code {
                 KeyCode::Up => {
-                    if shift {
-                        // Extend selection up
-                        if let Some((min_row, max_row)) = spreadsheet.selected_rows {
-                            if spreadsheet.cursor_row > 0 {
-                                spreadsheet.cursor_row -= 1;
-                                spreadsheet.selected_rows = Some((
-                                    spreadsheet.cursor_row.min(min_row),
-                                    spreadsheet.cursor_row.max(max_row),
-                                ));
-                            }
-                        }
-                    } else {
-                        // Move cursor up
-                        if spreadsheet.cursor_row > 0 {
+                    // If cursor is at max_row and selection has more than one row, deselect bottom row
+                    // Otherwise extend selection up
+                    if let Some((min_row, max_row)) = spreadsheet.selected_rows {
+                        if spreadsheet.cursor_row == max_row && max_row > min_row {
+                            // Deselect the bottom row
                             spreadsheet.cursor_row -= 1;
-                            spreadsheet.selected_rows = Some((spreadsheet.cursor_row, spreadsheet.cursor_row));
+                            spreadsheet.selected_rows = Some((min_row, max_row - 1));
+                        } else if spreadsheet.cursor_row > 0 {
+                            // Extend selection up
+                            spreadsheet.cursor_row -= 1;
+                            spreadsheet.selected_rows = Some((
+                                spreadsheet.cursor_row.min(min_row),
+                                max_row,
+                            ));
                         }
                     }
                 }
                 KeyCode::Down => {
-                    if shift {
-                        // Extend selection down
-                        if let Some((min_row, max_row)) = spreadsheet.selected_rows {
-                            if spreadsheet.cursor_row < spreadsheet.num_rows - 1 {
-                                spreadsheet.cursor_row += 1;
-                                spreadsheet.selected_rows = Some((
-                                    spreadsheet.cursor_row.min(min_row),
-                                    spreadsheet.cursor_row.max(max_row),
-                                ));
-                            }
-                        }
-                    } else {
-                        // Move cursor down
-                        if spreadsheet.cursor_row < spreadsheet.num_rows - 1 {
+                    // If cursor is at min_row and selection has more than one row, deselect top row
+                    // Otherwise extend selection down
+                    if let Some((min_row, max_row)) = spreadsheet.selected_rows {
+                        if spreadsheet.cursor_row == min_row && max_row > min_row {
+                            // Deselect the top row
                             spreadsheet.cursor_row += 1;
-                            spreadsheet.selected_rows = Some((spreadsheet.cursor_row, spreadsheet.cursor_row));
+                            spreadsheet.selected_rows = Some((min_row + 1, max_row));
+                        } else if spreadsheet.cursor_row < spreadsheet.num_rows - 1 {
+                            // Extend selection down
+                            spreadsheet.cursor_row += 1;
+                            spreadsheet.selected_rows = Some((
+                                min_row,
+                                spreadsheet.cursor_row.max(max_row),
+                            ));
                         }
                     }
                 }
-                KeyCode::Char('d') | KeyCode::Char('D') => {
+                KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Delete | KeyCode::Backspace => {
                     spreadsheet.delete_selected_rows();
+                }
+                KeyCode::Char('i') | KeyCode::Char('I') => {
+                    spreadsheet.insert_rows_after_selected();
                 }
                 KeyCode::Esc => {
                     spreadsheet.exit_row_column_select_mode();
@@ -417,47 +453,46 @@ fn handle_row_column_select_mode(
         RowColumnSelectMode::ColumnSelect => {
             match code {
                 KeyCode::Left => {
-                    if shift {
-                        // Extend selection left
-                        if let Some((min_col, max_col)) = spreadsheet.selected_cols {
-                            if spreadsheet.cursor_col > 0 {
-                                spreadsheet.cursor_col -= 1;
-                                spreadsheet.selected_cols = Some((
-                                    spreadsheet.cursor_col.min(min_col),
-                                    spreadsheet.cursor_col.max(max_col),
-                                ));
-                            }
-                        }
-                    } else {
-                        // Move cursor left
-                        if spreadsheet.cursor_col > 0 {
+                    // If cursor is at max_col and selection has more than one column, deselect rightmost column
+                    // Otherwise extend selection left
+                    if let Some((min_col, max_col)) = spreadsheet.selected_cols {
+                        if spreadsheet.cursor_col == max_col && max_col > min_col {
+                            // Deselect the rightmost column
                             spreadsheet.cursor_col -= 1;
-                            spreadsheet.selected_cols = Some((spreadsheet.cursor_col, spreadsheet.cursor_col));
+                            spreadsheet.selected_cols = Some((min_col, max_col - 1));
+                        } else if spreadsheet.cursor_col > 0 {
+                            // Extend selection left
+                            spreadsheet.cursor_col -= 1;
+                            spreadsheet.selected_cols = Some((
+                                spreadsheet.cursor_col.min(min_col),
+                                max_col,
+                            ));
                         }
                     }
                 }
                 KeyCode::Right => {
-                    if shift {
-                        // Extend selection right
-                        if let Some((min_col, max_col)) = spreadsheet.selected_cols {
-                            if spreadsheet.cursor_col < spreadsheet.num_cols - 1 {
-                                spreadsheet.cursor_col += 1;
-                                spreadsheet.selected_cols = Some((
-                                    spreadsheet.cursor_col.min(min_col),
-                                    spreadsheet.cursor_col.max(max_col),
-                                ));
-                            }
-                        }
-                    } else {
-                        // Move cursor right
-                        if spreadsheet.cursor_col < spreadsheet.num_cols - 1 {
+                    // If cursor is at min_col and selection has more than one column, deselect leftmost column
+                    // Otherwise extend selection right
+                    if let Some((min_col, max_col)) = spreadsheet.selected_cols {
+                        if spreadsheet.cursor_col == min_col && max_col > min_col {
+                            // Deselect the leftmost column
                             spreadsheet.cursor_col += 1;
-                            spreadsheet.selected_cols = Some((spreadsheet.cursor_col, spreadsheet.cursor_col));
+                            spreadsheet.selected_cols = Some((min_col + 1, max_col));
+                        } else if spreadsheet.cursor_col < spreadsheet.num_cols - 1 {
+                            // Extend selection right
+                            spreadsheet.cursor_col += 1;
+                            spreadsheet.selected_cols = Some((
+                                min_col,
+                                spreadsheet.cursor_col.max(max_col),
+                            ));
                         }
                     }
                 }
-                KeyCode::Char('d') | KeyCode::Char('D') => {
+                KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Delete | KeyCode::Backspace => {
                     spreadsheet.delete_selected_columns();
+                }
+                KeyCode::Char('i') | KeyCode::Char('I') => {
+                    spreadsheet.insert_columns_after_selected();
                 }
                 KeyCode::Esc => {
                     spreadsheet.exit_row_column_select_mode();
@@ -466,6 +501,41 @@ fn handle_row_column_select_mode(
             }
         }
         RowColumnSelectMode::None => {}
+    }
+}
+
+fn handle_find_mode(spreadsheet: &mut Spreadsheet, code: KeyCode, modifiers: KeyModifiers) {
+    let ctrl_or_cmd = modifiers.contains(KeyModifiers::CONTROL) || modifiers.contains(KeyModifiers::SUPER);
+    
+    match code {
+        // Copy (Ctrl+C / Cmd+C)
+        KeyCode::Char('c') if ctrl_or_cmd => {
+            spreadsheet.copy_selection();
+        }
+        // Cut (Ctrl+X / Cmd+X)
+        KeyCode::Char('x') if ctrl_or_cmd => {
+            spreadsheet.cut_selection();
+        }
+        // Paste (Ctrl+V / Cmd+V)
+        KeyCode::Char('v') if ctrl_or_cmd => {
+            spreadsheet.paste();
+        }
+        KeyCode::Char(c) => {
+            spreadsheet.find_query.push(c);
+            spreadsheet.update_find_matches();
+        }
+        KeyCode::Backspace => {
+            spreadsheet.find_query.pop();
+            spreadsheet.update_find_matches();
+        }
+        KeyCode::Enter => {
+            // Keep matches highlighted but exit find mode for navigation
+            spreadsheet.find_mode = false;
+        }
+        KeyCode::Esc => {
+            spreadsheet.exit_find_mode();
+        }
+        _ => {}
     }
 }
 

@@ -32,6 +32,24 @@ impl Spreadsheet {
             return self.evaluate_avg(inner);
         }
 
+        // Handle MIN function (case-insensitive)
+        if expr_upper.starts_with("MIN(") && expr_upper.ends_with(')') {
+            let inner = &expr[4..expr.len() - 1];
+            return self.evaluate_min(inner);
+        }
+
+        // Handle MAX function (case-insensitive)
+        if expr_upper.starts_with("MAX(") && expr_upper.ends_with(')') {
+            let inner = &expr[4..expr.len() - 1];
+            return self.evaluate_max(inner);
+        }
+
+        // Handle CORREL function (case-insensitive)
+        if expr_upper.starts_with("CORREL(") && expr_upper.ends_with(')') {
+            let inner = &expr[7..expr.len() - 1];
+            return self.evaluate_correl(inner);
+        }
+
         // Handle IF function (case-insensitive)
         if expr_upper.starts_with("IF(") && expr_upper.ends_with(')') {
             let inner = &expr[3..expr.len() - 1];
@@ -131,6 +149,178 @@ impl Spreadsheet {
         } else {
             format!("{}", avg)
         }
+    }
+
+    pub fn evaluate_min(&mut self, args: &str) -> String {
+        let mut min: Option<f64> = None;
+
+        for arg in args.split(',') {
+            let arg = arg.trim();
+
+            if let Some((start, end)) = arg.split_once(':') {
+                if let (Some((sr, sc)), Some((er, ec))) =
+                    (self.parse_cell_ref(start), self.parse_cell_ref(end))
+                {
+                    let min_row = sr.min(er);
+                    let max_row = sr.max(er);
+                    let min_col = sc.min(ec);
+                    let max_col = sc.max(ec);
+                    for row in min_row..=max_row {
+                        for col in min_col..=max_col {
+                            if let Some(val) = self.get_cell_value_at(row, col) {
+                                min = Some(min.map_or(val, |m| m.min(val)));
+                            }
+                        }
+                    }
+                } else {
+                    return "#ERROR".to_string();
+                }
+            } else if let Some(val) = self.get_cell_value(arg) {
+                min = Some(min.map_or(val, |m| m.min(val)));
+            } else if let Ok(val) = arg.parse::<f64>() {
+                min = Some(min.map_or(val, |m| m.min(val)));
+            }
+        }
+
+        match min {
+            Some(val) => {
+                if val.fract() == 0.0 {
+                    format!("{:.0}", val)
+                } else {
+                    format!("{}", val)
+                }
+            }
+            None => "#ERROR".to_string(),
+        }
+    }
+
+    pub fn evaluate_max(&mut self, args: &str) -> String {
+        let mut max: Option<f64> = None;
+
+        for arg in args.split(',') {
+            let arg = arg.trim();
+
+            if let Some((start, end)) = arg.split_once(':') {
+                if let (Some((sr, sc)), Some((er, ec))) =
+                    (self.parse_cell_ref(start), self.parse_cell_ref(end))
+                {
+                    let min_row = sr.min(er);
+                    let max_row = sr.max(er);
+                    let min_col = sc.min(ec);
+                    let max_col = sc.max(ec);
+                    for row in min_row..=max_row {
+                        for col in min_col..=max_col {
+                            if let Some(val) = self.get_cell_value_at(row, col) {
+                                max = Some(max.map_or(val, |m| m.max(val)));
+                            }
+                        }
+                    }
+                } else {
+                    return "#ERROR".to_string();
+                }
+            } else if let Some(val) = self.get_cell_value(arg) {
+                max = Some(max.map_or(val, |m| m.max(val)));
+            } else if let Ok(val) = arg.parse::<f64>() {
+                max = Some(max.map_or(val, |m| m.max(val)));
+            }
+        }
+
+        match max {
+            Some(val) => {
+                if val.fract() == 0.0 {
+                    format!("{:.0}", val)
+                } else {
+                    format!("{}", val)
+                }
+            }
+            None => "#ERROR".to_string(),
+        }
+    }
+
+    pub fn evaluate_correl(&mut self, args: &str) -> String {
+        // CORREL expects two ranges: CORREL(range1, range2)
+        let parts = self.split_function_args(args);
+        if parts.len() != 2 {
+            return "#ERROR".to_string();
+        }
+
+        let range1 = parts[0].trim();
+        let range2 = parts[1].trim();
+
+        // Collect values from both ranges
+        let values1 = self.collect_range_values(range1);
+        let values2 = self.collect_range_values(range2);
+
+        let (values1, values2) = match (values1, values2) {
+            (Some(v1), Some(v2)) => (v1, v2),
+            _ => return "#ERROR".to_string(),
+        };
+
+        // Both ranges must have the same length
+        if values1.len() != values2.len() || values1.is_empty() {
+            return "#ERROR".to_string();
+        }
+
+        let n = values1.len() as f64;
+
+        // Calculate means
+        let mean1: f64 = values1.iter().sum::<f64>() / n;
+        let mean2: f64 = values2.iter().sum::<f64>() / n;
+
+        // Calculate correlation coefficient
+        let mut covariance = 0.0;
+        let mut var1 = 0.0;
+        let mut var2 = 0.0;
+
+        for i in 0..values1.len() {
+            let diff1 = values1[i] - mean1;
+            let diff2 = values2[i] - mean2;
+            covariance += diff1 * diff2;
+            var1 += diff1 * diff1;
+            var2 += diff2 * diff2;
+        }
+
+        // Check for zero variance (division by zero)
+        if var1 == 0.0 || var2 == 0.0 {
+            return "#DIV/0!".to_string();
+        }
+
+        let correlation = covariance / (var1.sqrt() * var2.sqrt());
+
+        // Format with reasonable precision
+        format!("{:.6}", correlation)
+    }
+
+    fn collect_range_values(&mut self, range: &str) -> Option<Vec<f64>> {
+        let mut values = Vec::new();
+
+        if let Some((start, end)) = range.split_once(':') {
+            if let (Some((sr, sc)), Some((er, ec))) =
+                (self.parse_cell_ref(start), self.parse_cell_ref(end))
+            {
+                let min_row = sr.min(er);
+                let max_row = sr.max(er);
+                let min_col = sc.min(ec);
+                let max_col = sc.max(ec);
+                for row in min_row..=max_row {
+                    for col in min_col..=max_col {
+                        if let Some(val) = self.get_cell_value_at(row, col) {
+                            values.push(val);
+                        }
+                    }
+                }
+            } else {
+                return None;
+            }
+        } else if let Some(val) = self.get_cell_value(range) {
+            values.push(val);
+        } else if let Ok(val) = range.parse::<f64>() {
+            values.push(val);
+        } else {
+            return None;
+        }
+
+        Some(values)
     }
 
     pub fn evaluate_if(&mut self, args: &str, current_row: usize, current_col: usize) -> String {
@@ -501,5 +691,162 @@ mod tests {
         assert_eq!(sheet.evaluate_formula("=10-3", 0, 0), "7");
         assert_eq!(sheet.evaluate_formula("=4*5", 0, 0), "20");
         assert_eq!(sheet.evaluate_formula("=20/4", 0, 0), "5");
+    }
+
+    #[test]
+    fn test_evaluate_min() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "10".to_string());
+        sheet.set_cell(1, 0, "5".to_string());
+        sheet.set_cell(2, 0, "30".to_string());
+
+        assert_eq!(sheet.evaluate_formula("=MIN(A1:A3)", 0, 0), "5");
+        assert_eq!(sheet.evaluate_formula("=MIN(A3:A1)", 0, 0), "5"); // reversed range
+        assert_eq!(sheet.evaluate_formula("=MIN(10,5,30)", 0, 0), "5");
+        assert_eq!(sheet.evaluate_formula("=min(A1:A3)", 0, 0), "5"); // case insensitive
+    }
+
+    #[test]
+    fn test_evaluate_min_simple() {
+        // Test exactly what the user is doing: 1, 2, 3 in A1:A3, formula in A4
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "1".to_string());
+        sheet.set_cell(1, 0, "2".to_string());
+        sheet.set_cell(2, 0, "3".to_string());
+
+        // Formula would be entered in A4 (row 3, col 0)
+        assert_eq!(sheet.evaluate_formula("=MIN(A1:A3)", 3, 0), "1");
+        assert_eq!(sheet.evaluate_formula("=MAX(A1:A3)", 3, 0), "3");
+    }
+
+    #[test]
+    fn test_full_editing_flow_min() {
+        // Simulate the full editing flow as it happens in the UI
+        let mut sheet = Spreadsheet::new();
+        
+        // Step 1: Enter values in A1, A2, A3
+        sheet.set_cell(0, 0, "1".to_string());
+        sheet.set_cell(1, 0, "2".to_string());
+        sheet.set_cell(2, 0, "3".to_string());
+        
+        // Step 2: Move cursor to A4
+        sheet.cursor_row = 3;
+        sheet.cursor_col = 0;
+        
+        // Step 3: Start editing and type =MIN(
+        sheet.start_editing();
+        for c in "=MIN(".chars() {
+            sheet.handle_char_input(c);
+        }
+        
+        // After typing '(' it enters ref selection mode
+        assert!(sheet.formula_mode);
+        assert!(sheet.selecting_ref);
+        
+        // Step 4: Move to A1 and extend to A3
+        sheet.ref_cursor_row = 0;
+        sheet.ref_cursor_col = 0;
+        sheet.update_ref_in_buffer();
+        
+        // Extend to A3
+        sheet.ref_anchor = Some((0, 0));
+        sheet.ref_cursor_row = 2;
+        sheet.update_ref_in_buffer();
+        
+        // Step 5: Finish editing (this auto-closes the paren)
+        sheet.finish_editing();
+        
+        // Check what was stored
+        let stored = sheet.get_cell(3, 0).to_string();
+        println!("Stored formula: '{}'", stored);
+        
+        // Evaluate the formula
+        let result = sheet.evaluate_formula(&stored, 3, 0);
+        println!("Result: '{}'", result);
+        
+        assert_eq!(result, "1");
+    }
+
+    #[test]
+    fn test_min_with_spaces() {
+        // Test with spaces around the range
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "1".to_string());
+        sheet.set_cell(1, 0, "2".to_string());
+        sheet.set_cell(2, 0, "3".to_string());
+
+        // These should all work
+        assert_eq!(sheet.evaluate_formula("=MIN(A1:A3)", 3, 0), "1");
+        assert_eq!(sheet.evaluate_formula("=MIN( A1:A3)", 3, 0), "1");
+        assert_eq!(sheet.evaluate_formula("=MIN(A1:A3 )", 3, 0), "1");
+        assert_eq!(sheet.evaluate_formula("=MIN( A1:A3 )", 3, 0), "1");
+    }
+
+    #[test]
+    fn test_min_manual_typing() {
+        // Test when user types the formula manually character by character
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "1".to_string());
+        sheet.set_cell(1, 0, "2".to_string());
+        sheet.set_cell(2, 0, "3".to_string());
+
+        // Manually typed formula
+        sheet.cursor_row = 3;
+        sheet.cursor_col = 0;
+        sheet.start_editing();
+        
+        // Type =MIN(A1:A3) character by character
+        for c in "=MIN(A1:A3)".chars() {
+            sheet.handle_char_input(c);
+        }
+        
+        // Don't use ref selection, just type it out
+        sheet.selecting_ref = false;
+        
+        println!("Edit buffer: '{}'", sheet.edit_buffer);
+        
+        sheet.finish_editing();
+        
+        let stored = sheet.get_cell(3, 0).to_string();
+        println!("Stored: '{}'", stored);
+        
+        let result = sheet.evaluate_formula(&stored, 3, 0);
+        println!("Result: '{}'", result);
+        
+        assert_eq!(result, "1");
+    }
+
+    #[test]
+    fn test_evaluate_max() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "10".to_string());
+        sheet.set_cell(1, 0, "5".to_string());
+        sheet.set_cell(2, 0, "30".to_string());
+
+        assert_eq!(sheet.evaluate_formula("=MAX(A1:A3)", 0, 0), "30");
+        assert_eq!(sheet.evaluate_formula("=MAX(A3:A1)", 0, 0), "30"); // reversed range
+        assert_eq!(sheet.evaluate_formula("=MAX(10,5,30)", 0, 0), "30");
+        assert_eq!(sheet.evaluate_formula("=max(A1:A3)", 0, 0), "30"); // case insensitive
+    }
+
+    #[test]
+    fn test_evaluate_correl() {
+        let mut sheet = Spreadsheet::new();
+        // Perfect positive correlation
+        sheet.set_cell(0, 0, "1".to_string());
+        sheet.set_cell(1, 0, "2".to_string());
+        sheet.set_cell(2, 0, "3".to_string());
+        sheet.set_cell(0, 1, "2".to_string());
+        sheet.set_cell(1, 1, "4".to_string());
+        sheet.set_cell(2, 1, "6".to_string());
+
+        let result = sheet.evaluate_formula("=CORREL(A1:A3, B1:B3)", 0, 0);
+        let correl: f64 = result.parse().unwrap();
+        assert!((correl - 1.0).abs() < 0.0001); // Should be 1.0 for perfect positive correlation
+
+        // Test case insensitive
+        let result2 = sheet.evaluate_formula("=correl(A1:A3, B1:B3)", 0, 0);
+        let correl2: f64 = result2.parse().unwrap();
+        assert!((correl2 - 1.0).abs() < 0.0001);
     }
 }
