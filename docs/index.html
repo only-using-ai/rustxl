@@ -1,0 +1,703 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RustXL - Terminal Spreadsheet</title>
+    <meta name="description"
+        content="A fast, terminal-based spreadsheet application with vim-style navigation and Excel-compatible formulas. Built with Rust.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+    <nav class="navbar">
+        <div class="nav-container">
+            <a href="#" class="nav-logo">
+                <span class="logo-icon">xl</span>
+                <span class="logo-text">RustXL</span>
+            </a>
+            <div class="nav-links">
+                <a href="#features">Features</a>
+                <a href="#showcase">Screenshots</a>
+                <a href="#installation">Install</a>
+                <a href="#usage">Usage</a>
+                <a href="#formulas">Formulas</a>
+                <a href="#keybindings">Keys</a>
+                <a href="https://github.com/only-using-ai/rustxl" class="nav-github" target="_blank" rel="noopener">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                        <path
+                            d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z" />
+                    </svg>
+                    GitHub
+                </a>
+            </div>
+            <button class="nav-toggle" aria-label="Toggle navigation">
+                <span></span>
+                <span></span>
+                <span></span>
+            </button>
+        </div>
+    </nav>
+
+    <section class="hero">
+        <div class="hero-bg"></div>
+        <div class="hero-content">
+            <div class="hero-badge">Built with Rust</div>
+            <h1>Spreadsheets in your terminal</h1>
+            <p class="hero-subtitle">A fast, keyboard-driven spreadsheet with vim-style navigation and Excel-compatible
+                formulas. No GUI needed.</p>
+            <div class="hero-actions">
+                <a href="#installation" class="btn btn-primary">
+                    Get Started
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M5 12h14M12 5l7 7-7 7" />
+                    </svg>
+                </a>
+                <a href="#usage" class="btn btn-secondary">View Docs</a>
+            </div>
+            <div class="hero-screenshot">
+                <img src="images/dark-mode-blank.png" alt="RustXL terminal spreadsheet in dark mode" loading="eager">
+            </div>
+        </div>
+    </section>
+
+    <section class="features" id="features">
+        <div class="container">
+            <div class="section-header">
+                <h2>Why RustXL?</h2>
+                <p>Everything you need for spreadsheet work, right in your terminal</p>
+            </div>
+            <div class="features-grid">
+                <div class="feature-card">
+                    <div class="feature-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <path d="M13 10V3L4 14h7v7l9-11h-7z" />
+                        </svg>
+                    </div>
+                    <h3>Blazingly Fast</h3>
+                    <p>Built with Rust for maximum performance. Instant startup, smooth scrolling, and responsive
+                        editing even with large datasets.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <rect x="3" y="3" width="7" height="7" />
+                            <rect x="14" y="3" width="7" height="7" />
+                            <rect x="14" y="14" width="7" height="7" />
+                            <rect x="3" y="14" width="7" height="7" />
+                        </svg>
+                    </div>
+                    <h3>Vim-Style Navigation</h3>
+                    <p>Navigate with arrow keys or vim bindings. Modal editing, visual selection, and command mode all
+                        feel natural.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <path d="M4 7h16M4 12h16M4 17h10" />
+                            <circle cx="19" cy="17" r="2" />
+                        </svg>
+                    </div>
+                    <h3>20+ Formulas</h3>
+                    <p>Excel-compatible functions including SUM, AVG, IF, VLOOKUP, CONCATENATE, and more. Even execute
+                        shell commands with SHELL().</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                            <polyline points="14,2 14,8 20,8" />
+                            <line x1="16" y1="13" x2="8" y2="13" />
+                            <line x1="16" y1="17" x2="8" y2="17" />
+                        </svg>
+                    </div>
+                    <h3>Multiple Formats</h3>
+                    <p>Open and save CSV, TSV, and Excel files (.xlsx, .xls). Seamlessly work with existing spreadsheet
+                        data.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <path d="M12 2L2 7l10 5 10-5-10-5z" />
+                            <path d="M2 17l10 5 10-5" />
+                            <path d="M2 12l10 5 10-5" />
+                        </svg>
+                    </div>
+                    <h3>Unix Philosophy</h3>
+                    <p>Pipe data directly from other commands. Works perfectly in scripts and can be used as part of
+                        your data pipeline.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <circle cx="12" cy="12" r="3" />
+                            <path
+                                d="M12 1v6m0 6v6m11-7h-6m-6 0H1m15.5-6.5l-4.25 4.25m-2.5 2.5L5.5 18.5m13-1l-4.25-4.25m-2.5-2.5L5.5 5.5" />
+                        </svg>
+                    </div>
+                    <h3>Rich Styling</h3>
+                    <p>Colors, bold text, alignment options, and data type formatting. Dark and light themes with
+                        persistent settings.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="showcase" id="showcase">
+        <div class="container">
+            <div class="section-header">
+                <h2>See it in Action</h2>
+                <p>A powerful spreadsheet experience right in your terminal</p>
+            </div>
+            <div class="showcase-grid">
+                <div class="showcase-item showcase-large">
+                    <div class="showcase-image">
+                        <img src="images/ls-pipe.png" alt="Piping ls -Al output into RustXL" loading="lazy">
+                    </div>
+                    <div class="showcase-caption">
+                        <h3>Unix Pipes</h3>
+                        <p>Run <code>ls -Al | xl</code> to instantly view directory listings in a spreadsheet format</p>
+                    </div>
+                </div>
+                <div class="showcase-item">
+                    <div class="showcase-image">
+                        <img src="images/formula.png" alt="Formula editing in RustXL" loading="lazy">
+                    </div>
+                    <div class="showcase-caption">
+                        <h3>Formula Support</h3>
+                        <p>Excel-compatible formulas with live evaluation</p>
+                    </div>
+                </div>
+                <div class="showcase-item">
+                    <div class="showcase-image">
+                        <img src="images/dark-mode-blank.png" alt="RustXL in dark mode" loading="lazy">
+                    </div>
+                    <div class="showcase-caption">
+                        <h3>Dark Mode</h3>
+                        <p>Easy on the eyes for late-night data work</p>
+                    </div>
+                </div>
+                <div class="showcase-item">
+                    <div class="showcase-image">
+                        <img src="images/light-mode-blank.png" alt="RustXL in light mode" loading="lazy">
+                    </div>
+                    <div class="showcase-caption">
+                        <h3>Light Mode</h3>
+                        <p>Switch themes with a single keypress</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="installation" id="installation">
+        <div class="container">
+            <div class="section-header">
+                <h2>Installation</h2>
+                <p>Get up and running in seconds</p>
+            </div>
+            <div class="install-methods">
+                <div class="install-card">
+                    <div class="install-header">
+                        <span class="install-badge recommended">Recommended</span>
+                        <h3>From Source</h3>
+                    </div>
+                    <div class="install-steps">
+                        <div class="code-block">
+                            <div class="code-header">
+                                <span>Clone and build</span>
+                                <button class="copy-btn"
+                                    data-copy="git clone https://github.com/only-using-ai/rustxl && cd rustxl && cargo build --release">
+                                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                                        stroke-width="2">
+                                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                                    </svg>
+                                </button>
+                            </div>
+                            <pre><code><span class="prompt">$</span> git clone https://github.com/only-using-ai/rustxl
+<span class="prompt">$</span> cd rustxl
+<span class="prompt">$</span> cargo build --release</code></pre>
+                        </div>
+                        <div class="code-block">
+                            <div class="code-header">
+                                <span>Add to PATH (optional)</span>
+                                <button class="copy-btn" data-copy="cp target/release/xl /usr/local/bin/">
+                                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                                        stroke-width="2">
+                                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                                    </svg>
+                                </button>
+                            </div>
+                            <pre><code><span class="prompt">$</span> cp target/release/xl /usr/local/bin/</code></pre>
+                        </div>
+                    </div>
+                </div>
+                <div class="install-card">
+                    <div class="install-header">
+                        <h3>With Cargo</h3>
+                    </div>
+                    <div class="install-steps">
+                        <div class="code-block">
+                            <div class="code-header">
+                                <span>Install directly</span>
+                                <button class="copy-btn" data-copy="cargo install --path .">
+                                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                                        stroke-width="2">
+                                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                                    </svg>
+                                </button>
+                            </div>
+                            <pre><code><span class="prompt">$</span> cargo install --path .</code></pre>
+                        </div>
+                        <p class="install-note">Requires Rust 1.85+ (2024 edition)</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="usage" id="usage">
+        <div class="container">
+            <div class="section-header">
+                <h2>Usage</h2>
+                <p>Simple, intuitive, powerful</p>
+            </div>
+            <div class="usage-grid">
+                <div class="usage-card">
+                    <h3>Open a file</h3>
+                    <div class="code-block compact">
+                        <pre><code><span class="prompt">$</span> xl spreadsheet.csv
+<span class="prompt">$</span> xl data.xlsx
+<span class="prompt">$</span> xl report.tsv</code></pre>
+                    </div>
+                </div>
+                <div class="usage-card">
+                    <h3>Create new spreadsheet</h3>
+                    <div class="code-block compact">
+                        <pre><code><span class="prompt">$</span> xl</code></pre>
+                    </div>
+                </div>
+                <div class="usage-card">
+                    <h3>Pipe data in</h3>
+                    <div class="code-block compact">
+                        <pre><code><span class="prompt">$</span> ls -la | xl
+<span class="prompt">$</span> cat data.csv | xl
+<span class="prompt">$</span> curl api.example.com | xl</code></pre>
+                    </div>
+                </div>
+                <div class="usage-card">
+                    <h3>Process and save</h3>
+                    <div class="code-block compact">
+                        <pre><code><span class="comment"># Open file, edit, press 's' to save</span>
+<span class="prompt">$</span> xl input.csv
+<span class="comment"># Save as new file in save dialog</span></code></pre>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="formulas" id="formulas">
+        <div class="container">
+            <div class="section-header">
+                <h2>Formula Reference</h2>
+                <p>Excel-compatible functions for all your calculations</p>
+            </div>
+            <div class="formula-categories">
+                <div class="formula-category">
+                    <h3>
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <line x1="12" y1="5" x2="12" y2="19" />
+                            <line x1="5" y1="12" x2="19" y2="12" />
+                        </svg>
+                        Math Functions
+                    </h3>
+                    <div class="formula-list">
+                        <div class="formula-item">
+                            <code>=SUM(A1:A10)</code>
+                            <span>Sum of values in range</span>
+                        </div>
+                        <div class="formula-item">
+                            <code>=AVG(A1:A10)</code>
+                            <span>Average of values</span>
+                        </div>
+                        <div class="formula-item">
+                            <code>=MIN(A1:A10)</code>
+                            <span>Minimum value</span>
+                        </div>
+                        <div class="formula-item">
+                            <code>=MAX(A1:A10)</code>
+                            <span>Maximum value</span>
+                        </div>
+                        <div class="formula-item">
+                            <code>=COUNT(A1:A10)</code>
+                            <span>Count numeric cells</span>
+                        </div>
+                        <div class="formula-item">
+                            <code>=COUNTA(A1:A10)</code>
+                            <span>Count non-empty cells</span>
+                        </div>
+                        <div class="formula-item">
+                            <code>=ROUND(A1, 2)</code>
+                            <span>Round to decimal places</span>
+                        </div>
+                        <div class="formula-item">
+                            <code>=CORREL(A1:A10, B1:B10)</code>
+                            <span>Correlation coefficient</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="formula-category">
+                    <h3>
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+                            <polyline points="22 4 12 14.01 9 11.01" />
+                        </svg>
+                        Conditional Functions
+                    </h3>
+                    <div class="formula-list">
+                        <div class="formula-item">
+                            <code>=IF(A1>10, "Yes", "No")</code>
+                            <span>Conditional logic</span>
+                        </div>
+                        <div class="formula-item">
+                            <code>=COUNTIF(A1:A10, ">5")</code>
+                            <span>Count matching criteria</span>
+                        </div>
+                        <div class="formula-item">
+                            <code>=SUMIF(A1:A10, ">5")</code>
+                            <span>Sum matching criteria</span>
+                        </div>
+                        <div class="formula-item">
+                            <code>=AVERAGEIF(A1:A10, ">5")</code>
+                            <span>Average matching criteria</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="formula-category">
+                    <h3>
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <polyline points="4 7 4 4 20 4 20 7" />
+                            <line x1="9" y1="20" x2="15" y2="20" />
+                            <line x1="12" y1="4" x2="12" y2="20" />
+                        </svg>
+                        Text Functions
+                    </h3>
+                    <div class="formula-list">
+                        <div class="formula-item">
+                            <code>=CONCATENATE(A1, B1)</code>
+                            <span>Join text values</span>
+                        </div>
+                        <div class="formula-item">
+                            <code>=CONCAT(A1, " ", B1)</code>
+                            <span>Join text (alias)</span>
+                        </div>
+                        <div class="formula-item">
+                            <code>=LEFT(A1, 5)</code>
+                            <span>First N characters</span>
+                        </div>
+                        <div class="formula-item">
+                            <code>=RIGHT(A1, 5)</code>
+                            <span>Last N characters</span>
+                        </div>
+                        <div class="formula-item">
+                            <code>=MID(A1, 2, 5)</code>
+                            <span>Substring from position</span>
+                        </div>
+                        <div class="formula-item">
+                            <code>=LEN(A1)</code>
+                            <span>Length of text</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="formula-category">
+                    <h3>
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <circle cx="11" cy="11" r="8" />
+                            <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                        </svg>
+                        Lookup & Special
+                    </h3>
+                    <div class="formula-list">
+                        <div class="formula-item">
+                            <code>=VLOOKUP(A1, B1:D10, 2)</code>
+                            <span>Vertical lookup</span>
+                        </div>
+                        <div class="formula-item">
+                            <code>=SHELL("date")</code>
+                            <span>Execute shell command</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="formula-note">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="10" />
+                    <line x1="12" y1="16" x2="12" y2="12" />
+                    <line x1="12" y1="8" x2="12.01" y2="8" />
+                </svg>
+                <p>Formulas start with <code>=</code> and support arithmetic operators (+, -, *, /) with proper
+                    precedence. Cell references use A1 notation.</p>
+            </div>
+        </div>
+    </section>
+
+    <section class="keybindings" id="keybindings">
+        <div class="container">
+            <div class="section-header">
+                <h2>Keyboard Shortcuts</h2>
+                <p>Fast, intuitive controls for every operation</p>
+            </div>
+            <div class="keybindings-tabs">
+                <button class="tab-btn active" data-tab="navigation">Navigation</button>
+                <button class="tab-btn" data-tab="editing">Editing</button>
+                <button class="tab-btn" data-tab="visual">Visual Mode</button>
+                <button class="tab-btn" data-tab="file">File Operations</button>
+            </div>
+            <div class="keybindings-content">
+                <div class="tab-panel active" id="navigation">
+                    <div class="key-group">
+                        <div class="key-item">
+                            <kbd>Arrow Keys</kbd>
+                            <span>Navigate cells</span>
+                        </div>
+                        <div class="key-item">
+                            <kbd>Shift</kbd> + <kbd>Arrow</kbd>
+                            <span>Select range</span>
+                        </div>
+                        <div class="key-item">
+                            <kbd>Ctrl/Cmd</kbd> + <kbd>Arrow</kbd>
+                            <span>Jump to edge</span>
+                        </div>
+                        <div class="key-item">
+                            <kbd>Home</kbd>
+                            <span>Go to column A</span>
+                        </div>
+                        <div class="key-item">
+                            <kbd>Ctrl</kbd> + <kbd>Home</kbd>
+                            <span>Go to cell A1</span>
+                        </div>
+                        <div class="key-item">
+                            <kbd>:</kbd>
+                            <span>Command mode (jump to cell)</span>
+                        </div>
+                        <div class="key-item">
+                            <kbd>Shift</kbd> + <kbd>R</kbd>
+                            <span>Select entire row</span>
+                        </div>
+                        <div class="key-item">
+                            <kbd>Shift</kbd> + <kbd>C</kbd>
+                            <span>Select entire column</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="tab-panel" id="editing">
+                    <div class="key-group">
+                        <div class="key-item">
+                            <kbd>Enter</kbd>
+                            <span>Edit cell / Confirm edit</span>
+                        </div>
+                        <div class="key-item">
+                            <kbd>Esc</kbd>
+                            <span>Cancel edit</span>
+                        </div>
+                        <div class="key-item">
+                            <kbd>Delete</kbd>
+                            <span>Clear cell contents</span>
+                        </div>
+                        <div class="key-item">
+                            <kbd>Ctrl/Cmd</kbd> + <kbd>C</kbd>
+                            <span>Copy</span>
+                        </div>
+                        <div class="key-item">
+                            <kbd>Ctrl/Cmd</kbd> + <kbd>X</kbd>
+                            <span>Cut</span>
+                        </div>
+                        <div class="key-item">
+                            <kbd>Ctrl/Cmd</kbd> + <kbd>V</kbd>
+                            <span>Paste</span>
+                        </div>
+                        <div class="key-item">
+                            <kbd>Ctrl/Cmd</kbd> + <kbd>Z</kbd>
+                            <span>Undo</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="tab-panel" id="visual">
+                    <div class="key-group">
+                        <div class="key-item">
+                            <kbd>Tab</kbd>
+                            <span>Enter visual mode</span>
+                        </div>
+                        <div class="key-item">
+                            <kbd>f</kbd>
+                            <span>Foreground color</span>
+                        </div>
+                        <div class="key-item">
+                            <kbd>b</kbd>
+                            <span>Background color</span>
+                        </div>
+                        <div class="key-item">
+                            <kbd>a</kbd>
+                            <span>Text alignment</span>
+                        </div>
+                        <div class="key-item">
+                            <kbd>v</kbd>
+                            <span>Vertical alignment</span>
+                        </div>
+                        <div class="key-item">
+                            <kbd>w</kbd>
+                            <span>Column width</span>
+                        </div>
+                        <div class="key-item">
+                            <kbd>h</kbd>
+                            <span>Row height</span>
+                        </div>
+                        <div class="key-item">
+                            <kbd>t</kbd>
+                            <span>Set data type</span>
+                        </div>
+                        <div class="key-item">
+                            <kbd>s</kbd>
+                            <span>Toggle bold</span>
+                        </div>
+                        <div class="key-item">
+                            <kbd>c</kbd>
+                            <span>Clear formatting</span>
+                        </div>
+                        <div class="key-item">
+                            <kbd>m</kbd>
+                            <span>Toggle dark/light mode</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="tab-panel" id="file">
+                    <div class="key-group">
+                        <div class="key-item">
+                            <kbd>o</kbd>
+                            <span>Open file</span>
+                        </div>
+                        <div class="key-item">
+                            <kbd>s</kbd>
+                            <span>Save file</span>
+                        </div>
+                        <div class="key-item">
+                            <kbd>f</kbd>
+                            <span>Find in cells</span>
+                        </div>
+                        <div class="key-item">
+                            <kbd>n</kbd>
+                            <span>Next find match</span>
+                        </div>
+                        <div class="key-item">
+                            <kbd>Shift</kbd> + <kbd>N</kbd>
+                            <span>Previous find match</span>
+                        </div>
+                        <div class="key-item">
+                            <kbd>q</kbd>
+                            <span>Quit</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="data-types" id="data-types">
+        <div class="container">
+            <div class="section-header">
+                <h2>Data Types</h2>
+                <p>Format your cells for better readability</p>
+            </div>
+            <div class="types-grid">
+                <div class="type-card">
+                    <div class="type-example">Hello World</div>
+                    <h4>Text</h4>
+                    <p>Plain text values</p>
+                </div>
+                <div class="type-card">
+                    <div class="type-example">1,234.56</div>
+                    <h4>Number</h4>
+                    <p>Numeric formatting</p>
+                </div>
+                <div class="type-card">
+                    <div class="type-example">$1,234.56</div>
+                    <h4>Currency</h4>
+                    <p>Dollar formatting</p>
+                </div>
+                <div class="type-card">
+                    <div class="type-example">85.5%</div>
+                    <h4>Percentage</h4>
+                    <p>Percent formatting</p>
+                </div>
+                <div class="type-card">
+                    <div class="type-example">2024-01-15</div>
+                    <h4>Date</h4>
+                    <p>Date formatting</p>
+                </div>
+                <div class="type-card">
+                    <div class="type-example">14:30:00</div>
+                    <h4>Time</h4>
+                    <p>Time formatting</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="cta">
+        <div class="container">
+            <div class="cta-content">
+                <h2>Ready to try RustXL?</h2>
+                <p>Join developers who prefer the terminal for spreadsheet work.</p>
+                <div class="cta-actions">
+                    <a href="#installation" class="btn btn-primary btn-lg">
+                        Install Now
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <path d="M5 12h14M12 5l7 7-7 7" />
+                        </svg>
+                    </a>
+                    <a href="https://github.com/only-using-ai/rustxl" class="btn btn-ghost btn-lg" target="_blank"
+                        rel="noopener">
+                        View on GitHub
+                    </a>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <footer class="footer">
+        <div class="container">
+            <div class="footer-content">
+                <div class="footer-brand">
+                    <span class="logo-icon">xl</span>
+                    <span>RustXL</span>
+                </div>
+                <p>A fast, terminal-based spreadsheet application built with Rust.</p>
+                <div class="footer-links">
+                    <a href="https://github.com/only-using-ai/rustxl" target="_blank" rel="noopener">GitHub</a>
+                    <a href="https://github.com/only-using-ai/rustxl/issues" target="_blank" rel="noopener">Issues</a>
+                    <a href="https://github.com/only-using-ai/rustxl/blob/master/LICENSE" target="_blank"
+                        rel="noopener">License</a>
+                </div>
+            </div>
+        </div>
+    </footer>
+
+    <script src="script.js"></script>
+</body>
+
+</html>
