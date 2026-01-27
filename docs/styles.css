@@ -156,18 +156,11 @@ code, pre, kbd {
     font-size: 1.125rem;
 }
 
-.logo-icon {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
+.logo-img {
+    display: inline-block;
     width: 32px;
     height: 32px;
-    background: linear-gradient(135deg, var(--color-primary), #ea580c);
-    border-radius: var(--radius-md);
-    font-family: var(--font-mono);
-    font-size: 0.875rem;
-    font-weight: 700;
-    color: white;
+    flex-shrink: 0;
 }
 
 .nav-links {
@@ -247,6 +240,17 @@ code, pre, kbd {
     max-width: 900px;
     margin: 0 auto;
     text-align: center;
+}
+
+.hero-logo {
+    margin-bottom: var(--space-6);
+    display: flex;
+    justify-content: center;
+    animation: fadeIn 0.8s ease;
+}
+
+.hero-logo img {
+    filter: drop-shadow(0 4px 12px rgba(249, 115, 22, 0.3));
 }
 
 .hero-badge {

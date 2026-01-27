@@ -1,9 +1,17 @@
 # xl
 
-A fast, terminal-based spreadsheet application written in Rust.
+<div align="center">
+  <img src="docs/images/logo.svg" alt="RustXL Logo" width="200" height="200">
+</div>
 
-![Rust](https://img.shields.io/badge/rust-%23000000.svg?style=flat&logo=rust&logoColor=white)
-![License](https://img.shields.io/badge/license-MIT-blue.svg)
+<div align="center">
+  <h3>A fast, terminal-based spreadsheet application written in Rust.</h3>
+</div>
+
+<div align="center">
+  ![Rust](https://img.shields.io/badge/rust-%23000000.svg?style=flat&logo=rust&logoColor=white)
+  ![License](https://img.shields.io/badge/license-MIT-blue.svg)
+</div>
 
 ## Features
 
