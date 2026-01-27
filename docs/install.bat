@@ -54,8 +54,20 @@ echo Extracting archive...
 REM Extract using PowerShell (built into Windows 7+)
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Expand-Archive -Path '%TEMP_DIR%\xl-windows-x86_64.zip' -DestinationPath '%TEMP_DIR%' -Force" >nul 2>&1
 
-if not exist "%TEMP_DIR%\xl-windows-x86_64\xl.exe" (
+REM Find xl.exe - it might be directly in the archive or in a subdirectory
+set BINARY_PATH=
+
+REM Check if xl.exe is directly in the temp directory
+if exist "%TEMP_DIR%\xl.exe" (
+    set BINARY_PATH=%TEMP_DIR%\xl.exe
+) else if exist "%TEMP_DIR%\xl-windows-x86_64\xl.exe" (
+    set BINARY_PATH=%TEMP_DIR%\xl-windows-x86_64\xl.exe
+)
+
+if not defined BINARY_PATH (
     echo Error: Could not find xl.exe in archive
+    echo Archive contents:
+    dir /s /b "%TEMP_DIR%"
     rmdir /s /q "%TEMP_DIR%" 2>nul
     exit /b 1
 )
@@ -74,7 +86,7 @@ if not exist "%INSTALL_DIR%" (
 echo Installing xl.exe to %INSTALL_DIR%...
 
 REM Copy binary
-copy /Y "%TEMP_DIR%\xl-windows-x86_64\xl.exe" "%INSTALL_DIR%\xl.exe" >nul 2>&1
+copy /Y "%BINARY_PATH%" "%INSTALL_DIR%\xl.exe" >nul 2>&1
 
 if %ERRORLEVEL% NEQ 0 (
     echo Error: Failed to copy xl.exe

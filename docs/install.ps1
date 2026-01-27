@@ -134,29 +134,43 @@ function Main {
         Write-Output "Extracting archive..."
         Expand-Archive -Path $ARCHIVE_PATH -DestinationPath $TEMP_DIR -Force
         
-        # Find the extracted directory
-        $EXTRACTED_DIR = Get-ChildItem -Path $TEMP_DIR -Directory -Filter "xl-windows-x86_64" | Select-Object -First 1
-        
-        if (-not $EXTRACTED_DIR -or -not (Test-Path (Join-Path $EXTRACTED_DIR.FullName "xl.exe"))) {
+        # Find xl.exe - it might be directly in the archive or in a subdirectory
+        $BINARY_PATH = $null
+
+        # Check if xl.exe is directly in the temp directory
+        $DIRECT_PATH = Join-Path $TEMP_DIR "xl.exe"
+        if (Test-Path $DIRECT_PATH) {
+            $BINARY_PATH = $DIRECT_PATH
+        } else {
+            # Look for it in a subdirectory
+            $EXTRACTED_DIR = Get-ChildItem -Path $TEMP_DIR -Directory -Filter "xl-*" | Select-Object -First 1
+            if ($EXTRACTED_DIR -and (Test-Path (Join-Path $EXTRACTED_DIR.FullName "xl.exe"))) {
+                $BINARY_PATH = Join-Path $EXTRACTED_DIR.FullName "xl.exe"
+            }
+        }
+
+        if (-not $BINARY_PATH) {
             Write-Error "Error: Could not find xl.exe in archive"
+            Write-Output "Archive contents:"
+            Get-ChildItem -Path $TEMP_DIR -Recurse | ForEach-Object { Write-Output $_.FullName }
             exit 1
         }
-        
+
         Write-Success "Extraction complete!"
         Write-Output ""
-        
+
         # Determine installation location
         $INSTALL_DIR = Join-Path $env:LOCALAPPDATA "rustxl\bin"
-        
+
         # Create installation directory if it doesn't exist
         if (-not (Test-Path $INSTALL_DIR)) {
             New-Item -ItemType Directory -Path $INSTALL_DIR -Force | Out-Null
         }
-        
+
         Write-Output "Installing xl.exe to $INSTALL_DIR..."
-        
+
         # Copy binary
-        Copy-Item -Path (Join-Path $EXTRACTED_DIR.FullName "xl.exe") -Destination (Join-Path $INSTALL_DIR "xl.exe") -Force
+        Copy-Item -Path $BINARY_PATH -Destination (Join-Path $INSTALL_DIR "xl.exe") -Force
         
         Write-Success "Installation successful!"
         Write-Output ""

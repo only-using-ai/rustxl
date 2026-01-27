@@ -264,11 +264,24 @@ main() {
         exit 1
     fi
     
-    # Find the extracted directory
-    EXTRACTED_DIR=$(find . -maxdepth 1 -type d -name "xl-*" | head -n 1)
-    
-    if [ -z "$EXTRACTED_DIR" ] || [ ! -f "$EXTRACTED_DIR/xl" ]; then
+    # Find the xl binary - it might be directly in the archive or in a subdirectory
+    BINARY_PATH=""
+
+    # Check if xl binary is directly in the current directory
+    if [ -f "./xl" ]; then
+        BINARY_PATH="./xl"
+    else
+        # Look for it in a subdirectory
+        EXTRACTED_DIR=$(find . -maxdepth 1 -type d -name "xl-*" | head -n 1)
+        if [ -n "$EXTRACTED_DIR" ] && [ -f "$EXTRACTED_DIR/xl" ]; then
+            BINARY_PATH="$EXTRACTED_DIR/xl"
+        fi
+    fi
+
+    if [ -z "$BINARY_PATH" ]; then
         echo -e "${RED}Error: Could not find xl binary in archive${NC}"
+        echo "Archive contents:"
+        ls -la
         exit 1
     fi
     
@@ -291,11 +304,20 @@ main() {
     
     # Copy binary
     if [ "$USE_SUDO" = true ]; then
-        sudo cp "$EXTRACTED_DIR/xl" "$INSTALL_DIR/xl"
+        sudo cp "$BINARY_PATH" "$INSTALL_DIR/xl"
         sudo chmod +x "$INSTALL_DIR/xl"
     else
-        cp "$EXTRACTED_DIR/xl" "$INSTALL_DIR/xl"
+        cp "$BINARY_PATH" "$INSTALL_DIR/xl"
         chmod +x "$INSTALL_DIR/xl"
+    fi
+
+    # On macOS, remove quarantine attribute to allow the binary to run
+    if [ "$OS" = "macos" ]; then
+        if [ "$USE_SUDO" = true ]; then
+            sudo xattr -d com.apple.quarantine "$INSTALL_DIR/xl" 2>/dev/null || true
+        else
+            xattr -d com.apple.quarantine "$INSTALL_DIR/xl" 2>/dev/null || true
+        fi
     fi
     
     # Check if installation was successful
