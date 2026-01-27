@@ -369,6 +369,82 @@ impl Spreadsheet {
         self.cursor_col = new_col.min(self.num_cols - 1);
     }
 
+    /// Find the rightmost column with data in the given row
+    pub fn find_last_col_in_row(&self, row: usize) -> Option<usize> {
+        let mut max_col = None;
+        for &(r, c) in self.cells.keys() {
+            if r == row && !self.get_cell(r, c).is_empty() {
+                max_col = Some(max_col.map_or(c, |m: usize| m.max(c)));
+            }
+        }
+        max_col
+    }
+
+    /// Find the leftmost column with data in the given row
+    pub fn find_first_col_in_row(&self, row: usize) -> Option<usize> {
+        let mut min_col = None;
+        for &(r, c) in self.cells.keys() {
+            if r == row && !self.get_cell(r, c).is_empty() {
+                min_col = Some(min_col.map_or(c, |m: usize| m.min(c)));
+            }
+        }
+        min_col
+    }
+
+    /// Find the bottommost row with data in the given column
+    pub fn find_last_row_in_col(&self, col: usize) -> Option<usize> {
+        let mut max_row = None;
+        for &(r, c) in self.cells.keys() {
+            if c == col && !self.get_cell(r, c).is_empty() {
+                max_row = Some(max_row.map_or(r, |m: usize| m.max(r)));
+            }
+        }
+        max_row
+    }
+
+    /// Find the topmost row with data in the given column
+    pub fn find_first_row_in_col(&self, col: usize) -> Option<usize> {
+        let mut min_row = None;
+        for &(r, c) in self.cells.keys() {
+            if c == col && !self.get_cell(r, c).is_empty() {
+                min_row = Some(min_row.map_or(r, |m: usize| m.min(r)));
+            }
+        }
+        min_row
+    }
+
+    /// Jump to the last data column in the current row (right)
+    pub fn jump_to_last_col(&mut self) {
+        if let Some(col) = self.find_last_col_in_row(self.cursor_row) {
+            self.cursor_col = col;
+            self.selection_anchor = None;
+        }
+    }
+
+    /// Jump to the first data column in the current row (left)
+    pub fn jump_to_first_col(&mut self) {
+        if let Some(col) = self.find_first_col_in_row(self.cursor_row) {
+            self.cursor_col = col;
+            self.selection_anchor = None;
+        }
+    }
+
+    /// Jump to the last data row in the current column (down)
+    pub fn jump_to_last_row(&mut self) {
+        if let Some(row) = self.find_last_row_in_col(self.cursor_col) {
+            self.cursor_row = row;
+            self.selection_anchor = None;
+        }
+    }
+
+    /// Jump to the first data row in the current column (up)
+    pub fn jump_to_first_row(&mut self) {
+        if let Some(row) = self.find_first_row_in_col(self.cursor_col) {
+            self.cursor_row = row;
+            self.selection_anchor = None;
+        }
+    }
+
     pub fn get_selection_range(&self) -> Option<((usize, usize), (usize, usize))> {
         if let Some((anchor_row, anchor_col)) = self.selection_anchor {
             let min_row = anchor_row.min(self.cursor_row);

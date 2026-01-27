@@ -14,7 +14,55 @@ use crate::constants::{
     DARK_SELECTED_BG, DARK_SELECTED_HEADER_BG, DARK_FIND_MATCH_BG,
 };
 use crate::spreadsheet::Spreadsheet;
-use crate::types::{RowColumnSelectMode, SaveFormat, TextAlignment, VerticalAlignment, VisualSubMode};
+use crate::types::{DataType, RowColumnSelectMode, SaveFormat, TextAlignment, VerticalAlignment, VisualSubMode};
+
+fn format_cell_by_type(value: &str, data_type: DataType) -> String {
+    if value.is_empty() {
+        return value.to_string();
+    }
+
+    match data_type {
+        DataType::Text => value.to_string(),
+        DataType::Number => {
+            if let Ok(num) = value.parse::<f64>() {
+                // Format number with appropriate decimal places
+                if num.fract() == 0.0 {
+                    format!("{:.0}", num)
+                } else {
+                    format!("{}", num)
+                }
+            } else {
+                value.to_string()
+            }
+        }
+        DataType::Currency => {
+            if let Ok(num) = value.parse::<f64>() {
+                if num.fract() == 0.0 {
+                    format!("${:.0}", num)
+                } else {
+                    format!("${:.2}", num)
+                }
+            } else {
+                value.to_string()
+            }
+        }
+        DataType::Percentage => {
+            if let Ok(num) = value.parse::<f64>() {
+                format!("{:.1}%", num * 100.0)
+            } else {
+                value.to_string()
+            }
+        }
+        DataType::Date => {
+            // For now, just return as-is. Could add date parsing/formatting later
+            value.to_string()
+        }
+        DataType::Time => {
+            // For now, just return as-is. Could add time parsing/formatting later
+            value.to_string()
+        }
+    }
+}
 
 pub fn render(f: &mut Frame, spreadsheet: &mut Spreadsheet) {
     let area = f.area();
@@ -201,10 +249,20 @@ fn render_grid(
                 // Evaluate cell - this may modify the spreadsheet for SHELL formulas
                 spreadsheet.evaluate_cell(row, col)
             };
+
+            let cell_style = spreadsheet.get_cell_style(row, col);
+            
+            // Format content based on data type
+            let formatted_content = if let Some(data_type) = cell_style.data_type {
+                format_cell_by_type(&evaluated, data_type)
+            } else {
+                evaluated.clone()
+            };
+
             let content = if is_cursor && spreadsheet.editing {
                 format!("{}_", spreadsheet.edit_buffer)
             } else {
-                evaluated.clone()
+                formatted_content.clone()
             };
 
             let is_in_ref_range = if let Some(((min_row, min_col), (max_row, max_col))) = ref_range
@@ -237,16 +295,27 @@ fn render_grid(
                 && row == spreadsheet.ref_cursor_row
                 && col == spreadsheet.ref_cursor_col;
 
-            let cell_style = spreadsheet.get_cell_style(row, col);
             let col_width = spreadsheet.get_col_width(col);
             let row_height = spreadsheet.get_row_height(row);
 
-            let is_number = Spreadsheet::is_numeric(&evaluated);
-            // Determine alignment: use cell style if set, otherwise default (numbers right, text left)
-            let alignment = cell_style.alignment.unwrap_or(if is_number {
-                TextAlignment::Right
-            } else {
-                TextAlignment::Left
+            let is_number = Spreadsheet::is_numeric(&formatted_content);
+            // Determine alignment: use cell style if set, otherwise use data type default, 
+            // or fall back to number/text detection
+            let alignment = cell_style.alignment.unwrap_or_else(|| {
+                if let Some(data_type) = cell_style.data_type {
+                    match data_type {
+                        DataType::Text => TextAlignment::Left,
+                        DataType::Number | DataType::Currency | DataType::Percentage => TextAlignment::Right,
+                        _ => if is_number { TextAlignment::Right } else { TextAlignment::Left },
+                    }
+                } else {
+                    // No data type set, use number/text detection
+                    if is_number {
+                        TextAlignment::Right
+                    } else {
+                        TextAlignment::Left
+                    }
+                }
             });
             
             // Determine vertical alignment: use cell style if set, otherwise default to Top
@@ -364,8 +433,12 @@ fn render_grid(
                     .fg(fg_color)
             };
             
-            // Apply bold modifier from cell style or cursor/ref selection
-            if cell_style.bold || is_cursor || is_ref_cursor {
+            // Apply bold modifier from cell style
+            if cell_style.bold {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+            // Cursor and ref cursor are always bold for visibility
+            if is_cursor || is_ref_cursor {
                 style = style.add_modifier(Modifier::BOLD);
             }
 
@@ -617,6 +690,8 @@ fn render_visual_status<'a>(
                 Span::styled(" Width  ", Style::default().fg(Color::DarkGray)),
                 Span::styled("h", Style::default().fg(Color::White)),
                 Span::styled(" Height  ", Style::default().fg(Color::DarkGray)),
+                Span::styled("t", Style::default().fg(Color::White)),
+                Span::styled(" Type  ", Style::default().fg(Color::DarkGray)),
                 Span::styled("c", Style::default().fg(Color::White)),
                 Span::styled(" Clear  ", Style::default().fg(Color::DarkGray)),
                 Span::styled("m", Style::default().fg(Color::White)),
@@ -709,6 +784,26 @@ fn render_visual_status<'a>(
             Span::styled(" Increase (Bold)  ", Style::default().fg(Color::DarkGray)),
             Span::styled("-/↓", Style::default().fg(Color::White)),
             Span::styled(" Decrease (Normal)  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Esc", Style::default().fg(Color::White)),
+            Span::styled(" Back", Style::default().fg(Color::DarkGray)),
+        ]),
+        VisualSubMode::DataType => Line::from(vec![
+            Span::styled(mode, mode_style),
+            Span::styled("  Data Type: ", Style::default().fg(Color::DarkGray)),
+            Span::styled("1", Style::default().fg(Color::White)),
+            Span::styled("-Text ", Style::default().fg(Color::DarkGray)),
+            Span::styled("2", Style::default().fg(Color::White)),
+            Span::styled("-Number ", Style::default().fg(Color::DarkGray)),
+            Span::styled("3", Style::default().fg(Color::White)),
+            Span::styled("-Currency ", Style::default().fg(Color::DarkGray)),
+            Span::styled("4", Style::default().fg(Color::White)),
+            Span::styled("-Percentage ", Style::default().fg(Color::DarkGray)),
+            Span::styled("5", Style::default().fg(Color::White)),
+            Span::styled("-Date ", Style::default().fg(Color::DarkGray)),
+            Span::styled("6", Style::default().fg(Color::White)),
+            Span::styled("-Time ", Style::default().fg(Color::DarkGray)),
+            Span::styled("0", Style::default().fg(Color::White)),
+            Span::styled("-Default ", Style::default().fg(Color::DarkGray)),
             Span::styled("Esc", Style::default().fg(Color::White)),
             Span::styled(" Back", Style::default().fg(Color::DarkGray)),
         ]),

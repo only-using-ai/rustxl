@@ -56,6 +56,84 @@ impl Spreadsheet {
             return self.evaluate_if(inner, row, col);
         }
 
+        // Handle COUNT function (case-insensitive)
+        if expr_upper.starts_with("COUNT(") && expr_upper.ends_with(')') {
+            let inner = &expr[6..expr.len() - 1];
+            return self.evaluate_count(inner);
+        }
+
+        // Handle COUNTA function (case-insensitive)
+        if expr_upper.starts_with("COUNTA(") && expr_upper.ends_with(')') {
+            let inner = &expr[7..expr.len() - 1];
+            return self.evaluate_counta(inner);
+        }
+
+        // Handle COUNTIF function (case-insensitive)
+        if expr_upper.starts_with("COUNTIF(") && expr_upper.ends_with(')') {
+            let inner = &expr[8..expr.len() - 1];
+            return self.evaluate_countif(inner, row, col);
+        }
+
+        // Handle SUMIF function (case-insensitive)
+        if expr_upper.starts_with("SUMIF(") && expr_upper.ends_with(')') {
+            let inner = &expr[7..expr.len() - 1];
+            return self.evaluate_sumif(inner, row, col);
+        }
+
+        // Handle AVERAGEIF function (case-insensitive)
+        if expr_upper.starts_with("AVERAGEIF(") && expr_upper.ends_with(')') {
+            let inner = &expr[10..expr.len() - 1];
+            return self.evaluate_averageif(inner, row, col);
+        }
+
+        // Handle ROUND function (case-insensitive)
+        if expr_upper.starts_with("ROUND(") && expr_upper.ends_with(')') {
+            let inner = &expr[6..expr.len() - 1];
+            return self.evaluate_round(inner, row, col);
+        }
+
+        // Handle CONCATENATE function (case-insensitive)
+        if expr_upper.starts_with("CONCATENATE(") && expr_upper.ends_with(')') {
+            let inner = &expr[12..expr.len() - 1];
+            return self.evaluate_concatenate(inner, row, col);
+        }
+
+        // Handle CONCAT function (case-insensitive)
+        if expr_upper.starts_with("CONCAT(") && expr_upper.ends_with(')') {
+            let inner = &expr[7..expr.len() - 1];
+            return self.evaluate_concatenate(inner, row, col);
+        }
+
+        // Handle LEFT function (case-insensitive)
+        if expr_upper.starts_with("LEFT(") && expr_upper.ends_with(')') {
+            let inner = &expr[5..expr.len() - 1];
+            return self.evaluate_left(inner, row, col);
+        }
+
+        // Handle RIGHT function (case-insensitive)
+        if expr_upper.starts_with("RIGHT(") && expr_upper.ends_with(')') {
+            let inner = &expr[6..expr.len() - 1];
+            return self.evaluate_right(inner, row, col);
+        }
+
+        // Handle MID function (case-insensitive)
+        if expr_upper.starts_with("MID(") && expr_upper.ends_with(')') {
+            let inner = &expr[4..expr.len() - 1];
+            return self.evaluate_mid(inner, row, col);
+        }
+
+        // Handle LEN function (case-insensitive)
+        if expr_upper.starts_with("LEN(") && expr_upper.ends_with(')') {
+            let inner = &expr[4..expr.len() - 1];
+            return self.evaluate_len(inner, row, col);
+        }
+
+        // Handle VLOOKUP function (case-insensitive)
+        if expr_upper.starts_with("VLOOKUP(") && expr_upper.ends_with(')') {
+            let inner = &expr[8..expr.len() - 1];
+            return self.evaluate_vlookup(inner, row, col);
+        }
+
         // Handle simple arithmetic
         if let Ok(val) = self.evaluate_arithmetic(expr) {
             return format!("{}", val);
@@ -510,6 +588,616 @@ impl Spreadsheet {
         }
     }
 
+    pub fn evaluate_count(&mut self, args: &str) -> String {
+        let mut count = 0;
+
+        for arg in args.split(',') {
+            let arg = arg.trim();
+
+            if let Some((start, end)) = arg.split_once(':') {
+                if let (Some((sr, sc)), Some((er, ec))) =
+                    (self.parse_cell_ref(start), self.parse_cell_ref(end))
+                {
+                    let min_row = sr.min(er);
+                    let max_row = sr.max(er);
+                    let min_col = sc.min(ec);
+                    let max_col = sc.max(ec);
+                    for row in min_row..=max_row {
+                        for col in min_col..=max_col {
+                            if self.get_cell_value_at(row, col).is_some() {
+                                count += 1;
+                            }
+                        }
+                    }
+                } else {
+                    return "#ERROR".to_string();
+                }
+            } else if self.get_cell_value(arg).is_some() {
+                count += 1;
+            } else if arg.parse::<f64>().is_ok() {
+                count += 1;
+            }
+        }
+
+        format!("{}", count)
+    }
+
+    pub fn evaluate_counta(&mut self, args: &str) -> String {
+        let mut count = 0;
+
+        for arg in args.split(',') {
+            let arg = arg.trim();
+
+            if let Some((start, end)) = arg.split_once(':') {
+                if let (Some((sr, sc)), Some((er, ec))) =
+                    (self.parse_cell_ref(start), self.parse_cell_ref(end))
+                {
+                    let min_row = sr.min(er);
+                    let max_row = sr.max(er);
+                    let min_col = sc.min(ec);
+                    let max_col = sc.max(ec);
+                    for row in min_row..=max_row {
+                        for col in min_col..=max_col {
+                            if !self.get_cell(row, col).is_empty() {
+                                count += 1;
+                            }
+                        }
+                    }
+                } else {
+                    return "#ERROR".to_string();
+                }
+            } else {
+                let cell_content = if let Some((row, col)) = self.parse_cell_ref(arg) {
+                    self.get_cell(row, col)
+                } else {
+                    arg
+                };
+                if !cell_content.is_empty() {
+                    count += 1;
+                }
+            }
+        }
+
+        format!("{}", count)
+    }
+
+    pub fn evaluate_countif(&mut self, args: &str, current_row: usize, current_col: usize) -> String {
+        let parts = self.split_function_args(args);
+        if parts.len() != 2 {
+            return "#ERROR".to_string();
+        }
+
+        let range = parts[0].trim();
+        let criteria = parts[1].trim();
+
+        let mut count = 0;
+
+        // Collect all cells from the range
+        let cells = self.collect_range_cells(range);
+        for (row, col) in cells {
+            let cell_value = self.get_cell(row, col).to_string();
+            if self.cell_matches_criteria(&cell_value, criteria, current_row, current_col) {
+                count += 1;
+            }
+        }
+
+        format!("{}", count)
+    }
+
+    pub fn evaluate_sumif(&mut self, args: &str, current_row: usize, current_col: usize) -> String {
+        let parts = self.split_function_args(args);
+        if parts.len() < 2 || parts.len() > 3 {
+            return "#ERROR".to_string();
+        }
+
+        let range = parts[0].trim();
+        let criteria = parts[1].trim();
+        let sum_range = if parts.len() == 3 {
+            Some(parts[2].trim())
+        } else {
+            None
+        };
+
+        // Handle ranges the same way COUNTIF does - iterate directly
+        let mut sum = 0.0;
+        
+        // Process range similar to how COUNTIF does it
+        if let Some((start, end)) = range.split_once(':') {
+            let start = start.trim();
+            let end = end.trim();
+            if let (Some((sr, sc)), Some((er, ec))) =
+                (self.parse_cell_ref(start), self.parse_cell_ref(end))
+            {
+                let min_row = sr.min(er);
+                let max_row = sr.max(er);
+                let min_col = sc.min(ec);
+                let max_col = sc.max(ec);
+                
+                // Determine sum range cells
+                let sum_cells: Vec<(usize, usize)> = if let Some(sr) = sum_range {
+                    // Parse sum range
+                    if let Some((sum_start, sum_end)) = sr.split_once(':') {
+                        let sum_start = sum_start.trim();
+                        let sum_end = sum_end.trim();
+                        if let (Some((ssr, ssc)), Some((ser, sec))) =
+                            (self.parse_cell_ref(sum_start), self.parse_cell_ref(sum_end))
+                        {
+                            let mut cells = Vec::new();
+                            let sum_min_row = ssr.min(ser);
+                            let sum_max_row = ssr.max(ser);
+                            let sum_min_col = ssc.min(sec);
+                            let sum_max_col = ssc.max(sec);
+                            for row in sum_min_row..=sum_max_row {
+                                for col in sum_min_col..=sum_max_col {
+                                    cells.push((row, col));
+                                }
+                            }
+                            cells
+                        } else {
+                            return "#ERROR".to_string();
+                        }
+                    } else if let Some((row, col)) = self.parse_cell_ref(sr) {
+                        vec![(row, col)]
+                    } else {
+                        return "#ERROR".to_string();
+                    }
+                } else {
+                    // Use criteria range as sum range
+                    let mut cells = Vec::new();
+                    for row in min_row..=max_row {
+                        for col in min_col..=max_col {
+                            cells.push((row, col));
+                        }
+                    }
+                    cells
+                };
+                
+                // Check if ranges have same size
+                let criteria_size = (max_row - min_row + 1) * (max_col - min_col + 1);
+                if criteria_size != sum_cells.len() {
+                    return "#ERROR".to_string();
+                }
+                
+                // Iterate through criteria range and sum matching cells
+                let mut criteria_idx = 0;
+                for row in min_row..=max_row {
+                    for col in min_col..=max_col {
+                        let cell_value = self.get_cell(row, col).to_string();
+                        if self.cell_matches_criteria(&cell_value, criteria, current_row, current_col) {
+                            if let Some((sum_row, sum_col)) = sum_cells.get(criteria_idx) {
+                                if let Some(val) = self.get_cell_value_at(*sum_row, *sum_col) {
+                                    sum += val;
+                                }
+                            }
+                        }
+                        criteria_idx += 1;
+                    }
+                }
+            } else {
+                return "#ERROR".to_string();
+            }
+        } else if let Some((row, col)) = self.parse_cell_ref(range) {
+            // Single cell range
+            let cell_value = self.get_cell(row, col).to_string();
+            if self.cell_matches_criteria(&cell_value, criteria, current_row, current_col) {
+                if let Some(sr) = sum_range {
+                    if let Some((sum_row, sum_col)) = self.parse_cell_ref(sr) {
+                        if let Some(val) = self.get_cell_value_at(sum_row, sum_col) {
+                            sum += val;
+                        }
+                    }
+                } else {
+                    if let Some(val) = self.get_cell_value_at(row, col) {
+                        sum += val;
+                    }
+                }
+            }
+        } else {
+            return "#ERROR".to_string();
+        }
+
+        format!("{}", sum)
+    }
+
+    pub fn evaluate_averageif(&mut self, args: &str, current_row: usize, current_col: usize) -> String {
+        let parts = self.split_function_args(args);
+        if parts.len() < 2 || parts.len() > 3 {
+            return "#ERROR".to_string();
+        }
+
+        let range = parts[0].trim();
+        let criteria = parts[1].trim();
+        let avg_range = if parts.len() == 3 {
+            Some(parts[2].trim())
+        } else {
+            None
+        };
+
+        let mut sum = 0.0;
+        let mut count = 0;
+
+        // Collect cells from criteria range
+        let criteria_cells = self.collect_range_cells(range);
+        let avg_cells = if let Some(ar) = avg_range {
+            self.collect_range_cells(ar)
+        } else {
+            criteria_cells.clone()
+        };
+
+        // Both ranges must have the same size
+        if criteria_cells.len() != avg_cells.len() {
+            return "#ERROR".to_string();
+        }
+
+        for (i, (row, col)) in criteria_cells.iter().enumerate() {
+            let cell_value = self.get_cell(*row, *col).to_string();
+            if self.cell_matches_criteria(&cell_value, criteria, current_row, current_col) {
+                if let Some((avg_row, avg_col)) = avg_cells.get(i) {
+                    if let Some(val) = self.get_cell_value_at(*avg_row, *avg_col) {
+                        sum += val;
+                        count += 1;
+                    }
+                }
+            }
+        }
+
+        if count == 0 {
+            return "#DIV/0!".to_string();
+        }
+
+        let avg = sum / (count as f64);
+        if avg.fract() == 0.0 {
+            format!("{:.0}", avg)
+        } else {
+            format!("{}", avg)
+        }
+    }
+
+    pub fn evaluate_round(&mut self, args: &str, current_row: usize, current_col: usize) -> String {
+        let parts = self.split_function_args(args);
+        if parts.len() != 2 {
+            return "#ERROR".to_string();
+        }
+
+        let number_str = parts[0].trim();
+        let num_digits_str = parts[1].trim();
+
+        let number = match self.evaluate_arg_as_number(number_str, current_row, current_col) {
+            Some(n) => n,
+            None => return "#ERROR".to_string(),
+        };
+        let num_digits = match self.evaluate_arg_as_number(num_digits_str, current_row, current_col) {
+            Some(n) => n,
+            None => return "#ERROR".to_string(),
+        };
+
+        let multiplier = 10_f64.powi(num_digits as i32);
+        let rounded = (number * multiplier).round() / multiplier;
+
+        if rounded.fract() == 0.0 {
+            format!("{:.0}", rounded)
+        } else {
+            format!("{}", rounded)
+        }
+    }
+
+    pub fn evaluate_concatenate(&mut self, args: &str, current_row: usize, current_col: usize) -> String {
+        let parts = self.split_function_args(args);
+        let mut result = String::new();
+
+        for part in parts {
+            let part = part.trim();
+            let value = self.evaluate_arg(part, current_row, current_col);
+            result.push_str(&value);
+        }
+
+        result
+    }
+
+    pub fn evaluate_left(&mut self, args: &str, current_row: usize, current_col: usize) -> String {
+        let parts = self.split_function_args(args);
+        if parts.len() != 2 {
+            return "#ERROR".to_string();
+        }
+
+        let text_str = parts[0].trim();
+        let num_chars_str = parts[1].trim();
+
+        let text = self.evaluate_arg(text_str, current_row, current_col);
+        let num_chars = match self.evaluate_arg_as_number(num_chars_str, current_row, current_col) {
+            Some(n) => n as usize,
+            None => return "#ERROR".to_string(),
+        };
+
+        // Remove quotes if present
+        let text = if text.len() >= 2 {
+            let first_char = text.chars().next().unwrap();
+            let last_char = text.chars().last().unwrap();
+            if (first_char == '"' && last_char == '"') || (first_char == '\'' && last_char == '\'') {
+                text[1..text.len() - 1].to_string()
+            } else {
+                text
+            }
+        } else {
+            text
+        };
+
+        let chars: Vec<char> = text.chars().collect();
+        let end = num_chars.min(chars.len());
+        chars[..end].iter().collect()
+    }
+
+    pub fn evaluate_right(&mut self, args: &str, current_row: usize, current_col: usize) -> String {
+        let parts = self.split_function_args(args);
+        if parts.len() != 2 {
+            return "#ERROR".to_string();
+        }
+
+        let text_str = parts[0].trim();
+        let num_chars_str = parts[1].trim();
+
+        let text = self.evaluate_arg(text_str, current_row, current_col);
+        let num_chars = match self.evaluate_arg_as_number(num_chars_str, current_row, current_col) {
+            Some(n) => n as usize,
+            None => return "#ERROR".to_string(),
+        };
+
+        // Remove quotes if present
+        let text = if text.len() >= 2 {
+            let first_char = text.chars().next().unwrap();
+            let last_char = text.chars().last().unwrap();
+            if (first_char == '"' && last_char == '"') || (first_char == '\'' && last_char == '\'') {
+                text[1..text.len() - 1].to_string()
+            } else {
+                text
+            }
+        } else {
+            text
+        };
+
+        let chars: Vec<char> = text.chars().collect();
+        let start = if num_chars > chars.len() {
+            0
+        } else {
+            chars.len() - num_chars
+        };
+        chars[start..].iter().collect()
+    }
+
+    pub fn evaluate_mid(&mut self, args: &str, current_row: usize, current_col: usize) -> String {
+        let parts = self.split_function_args(args);
+        if parts.len() != 3 {
+            return "#ERROR".to_string();
+        }
+
+        let text_str = parts[0].trim();
+        let start_num_str = parts[1].trim();
+        let num_chars_str = parts[2].trim();
+
+        let text = self.evaluate_arg(text_str, current_row, current_col);
+        let start_num = match self.evaluate_arg_as_number(start_num_str, current_row, current_col) {
+            Some(n) => n as usize,
+            None => return "#ERROR".to_string(),
+        };
+        let num_chars = match self.evaluate_arg_as_number(num_chars_str, current_row, current_col) {
+            Some(n) => n as usize,
+            None => return "#ERROR".to_string(),
+        };
+
+        // Remove quotes if present
+        let text = if text.len() >= 2 {
+            let first_char = text.chars().next().unwrap();
+            let last_char = text.chars().last().unwrap();
+            if (first_char == '"' && last_char == '"') || (first_char == '\'' && last_char == '\'') {
+                text[1..text.len() - 1].to_string()
+            } else {
+                text
+            }
+        } else {
+            text
+        };
+
+        let chars: Vec<char> = text.chars().collect();
+        if start_num == 0 || start_num > chars.len() {
+            return String::new();
+        }
+
+        let start = start_num - 1; // Excel uses 1-based indexing
+        let end = (start + num_chars).min(chars.len());
+        chars[start..end].iter().collect()
+    }
+
+    pub fn evaluate_len(&mut self, args: &str, current_row: usize, current_col: usize) -> String {
+        let text = self.evaluate_arg(args.trim(), current_row, current_col);
+
+        // Remove quotes if present
+        let text = if text.len() >= 2 {
+            let first_char = text.chars().next().unwrap();
+            let last_char = text.chars().last().unwrap();
+            if (first_char == '"' && last_char == '"') || (first_char == '\'' && last_char == '\'') {
+                text[1..text.len() - 1].to_string()
+            } else {
+                text
+            }
+        } else {
+            text
+        };
+
+        format!("{}", text.chars().count())
+    }
+
+    pub fn evaluate_vlookup(&mut self, args: &str, current_row: usize, current_col: usize) -> String {
+        let parts = self.split_function_args(args);
+        if parts.len() < 3 || parts.len() > 4 {
+            return "#ERROR".to_string();
+        }
+
+        let lookup_value_str = parts[0].trim();
+        let table_range = parts[1].trim();
+        let col_index_num_str = parts[2].trim();
+        let range_lookup = if parts.len() == 4 {
+            self.evaluate_arg_as_number(parts[3].trim(), current_row, current_col)
+                .map(|v| v.abs() < f64::EPSILON)
+                .unwrap_or(true)
+        } else {
+            true
+        };
+
+        let lookup_value = self.evaluate_arg(lookup_value_str, current_row, current_col);
+        let col_index = match self.evaluate_arg_as_number(col_index_num_str, current_row, current_col) {
+            Some(n) => n as usize,
+            None => return "#ERROR".to_string(),
+        };
+
+        if col_index == 0 {
+            return "#ERROR".to_string();
+        }
+
+        // Collect table cells
+        let table_cells = self.collect_range_cells(table_range);
+        if table_cells.is_empty() {
+            return "#N/A".to_string();
+        }
+
+        // Find the number of columns in the table
+        let first_row = table_cells[0].0;
+        let mut max_col = table_cells[0].1;
+        for (row, col) in &table_cells {
+            if *row == first_row {
+                max_col = max_col.max(*col);
+            }
+        }
+        let num_cols = max_col - table_cells[0].1 + 1;
+
+        if col_index > num_cols {
+            return "#ERROR".to_string();
+        }
+
+        // Find matching row
+        let target_col = table_cells[0].1; // First column for lookup
+        let mut matching_row = None;
+
+        for (row, col) in &table_cells {
+            if *col == target_col {
+                let cell_value = self.get_cell(*row, *col);
+                if range_lookup {
+                    // Approximate match - find the largest value <= lookup_value
+                    if let Some(cell_num) = cell_value.parse::<f64>().ok() {
+                        if let Some(lookup_num) = lookup_value.parse::<f64>().ok() {
+                            if cell_num <= lookup_num {
+                                matching_row = Some(*row);
+                            } else {
+                                break;
+                            }
+                        }
+                    } else if cell_value == lookup_value {
+                        matching_row = Some(*row);
+                        break;
+                    }
+                } else {
+                    // Exact match
+                    if let Some(cell_num) = cell_value.parse::<f64>().ok() {
+                        if let Some(lookup_num) = lookup_value.parse::<f64>().ok() {
+                            if (cell_num - lookup_num).abs() < f64::EPSILON {
+                                matching_row = Some(*row);
+                                break;
+                            }
+                        }
+                    } else if cell_value == lookup_value {
+                        matching_row = Some(*row);
+                        break;
+                    }
+                }
+            }
+        }
+
+        if let Some(row) = matching_row {
+            let result_col = target_col + col_index - 1;
+            self.evaluate_cell(row, result_col)
+        } else {
+            "#N/A".to_string()
+        }
+    }
+
+    fn collect_range_cells(&self, range: &str) -> Vec<(usize, usize)> {
+        let mut cells = Vec::new();
+        let range = range.trim();
+
+        if let Some((start, end)) = range.split_once(':') {
+            let start = start.trim();
+            let end = end.trim();
+            if let (Some((sr, sc)), Some((er, ec))) =
+                (self.parse_cell_ref(start), self.parse_cell_ref(end))
+            {
+                let min_row = sr.min(er);
+                let max_row = sr.max(er);
+                let min_col = sc.min(ec);
+                let max_col = sc.max(ec);
+                for row in min_row..=max_row {
+                    for col in min_col..=max_col {
+                        cells.push((row, col));
+                    }
+                }
+            }
+        } else if let Some((row, col)) = self.parse_cell_ref(range) {
+            cells.push((row, col));
+        }
+
+        cells
+    }
+
+    fn cell_matches_criteria(&self, cell_value: &str, criteria: &str, _current_row: usize, _current_col: usize) -> bool {
+        let criteria = criteria.trim();
+
+        // Remove quotes if present
+        let criteria = if criteria.len() >= 2 {
+            let first_char = criteria.chars().next().unwrap();
+            let last_char = criteria.chars().last().unwrap();
+            if (first_char == '"' && last_char == '"') || (first_char == '\'' && last_char == '\'') {
+                &criteria[1..criteria.len() - 1]
+            } else {
+                criteria
+            }
+        } else {
+            criteria
+        };
+
+        // Check for comparison operators
+        let operators = [">=", "<=", "<>", ">", "<", "="];
+        for op in operators {
+            if let Some(pos) = criteria.find(op) {
+                let _left = criteria[..pos].trim();
+                let right = criteria[pos + op.len()..].trim();
+
+                // Try to parse cell_value as number
+                let cell_num = cell_value.parse::<f64>().ok();
+                let right_num = right.parse::<f64>().ok();
+
+                if let (Some(cn), Some(rn)) = (cell_num, right_num) {
+                    return match op {
+                        ">=" => cn >= rn,
+                        "<=" => cn <= rn,
+                        "<>" => (cn - rn).abs() > f64::EPSILON,
+                        ">" => cn > rn,
+                        "<" => cn < rn,
+                        "=" => (cn - rn).abs() < f64::EPSILON,
+                        _ => false,
+                    };
+                }
+            }
+        }
+
+        // String comparison (exact match or wildcard)
+        if criteria.contains('*') || criteria.contains('?') {
+            // Simple wildcard matching
+            let _pattern = criteria.replace('*', ".*").replace('?', ".");
+            // For now, just do simple contains check
+            cell_value.contains(&criteria.replace('*', "").replace('?', ""))
+        } else {
+            cell_value == criteria
+        }
+    }
+
     pub fn evaluate_shell(&mut self, args: &str, start_row: usize, start_col: usize) -> String {
         // Parse the command argument - handle quoted strings (single or double quotes)
         let command = if args.len() >= 2 {
@@ -848,5 +1536,178 @@ mod tests {
         let result2 = sheet.evaluate_formula("=correl(A1:A3, B1:B3)", 0, 0);
         let correl2: f64 = result2.parse().unwrap();
         assert!((correl2 - 1.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_evaluate_count() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "10".to_string());
+        sheet.set_cell(1, 0, "20".to_string());
+        sheet.set_cell(2, 0, "text".to_string());
+        sheet.set_cell(3, 0, "30".to_string());
+
+        assert_eq!(sheet.evaluate_formula("=COUNT(A1:A4)", 0, 0), "3"); // Only numeric values
+        assert_eq!(sheet.evaluate_formula("=COUNT(10,20,30)", 0, 0), "3");
+        assert_eq!(sheet.evaluate_formula("=count(A1:A4)", 0, 0), "3"); // case insensitive
+    }
+
+    #[test]
+    fn test_evaluate_counta() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "10".to_string());
+        sheet.set_cell(1, 0, "20".to_string());
+        sheet.set_cell(2, 0, "text".to_string());
+        sheet.set_cell(3, 0, "".to_string()); // Empty cell
+
+        assert_eq!(sheet.evaluate_formula("=COUNTA(A1:A4)", 0, 0), "3"); // Non-empty cells
+        assert_eq!(sheet.evaluate_formula("=COUNTA(A1:A3)", 0, 0), "3");
+        assert_eq!(sheet.evaluate_formula("=counta(A1:A3)", 0, 0), "3"); // case insensitive
+    }
+
+    #[test]
+    fn test_evaluate_countif() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "10".to_string());
+        sheet.set_cell(1, 0, "20".to_string());
+        sheet.set_cell(2, 0, "10".to_string());
+        sheet.set_cell(3, 0, "30".to_string());
+
+        assert_eq!(sheet.evaluate_formula("=COUNTIF(A1:A4,\"10\")", 0, 0), "2");
+        assert_eq!(sheet.evaluate_formula("=COUNTIF(A1:A4,\">20\")", 0, 0), "1");
+        assert_eq!(sheet.evaluate_formula("=COUNTIF(A1:A4,\"<20\")", 0, 0), "2");
+        assert_eq!(sheet.evaluate_formula("=countif(A1:A4,\"10\")", 0, 0), "2"); // case insensitive
+    }
+
+    #[test]
+    fn test_evaluate_sumif() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "A".to_string());
+        sheet.set_cell(1, 0, "B".to_string());
+        sheet.set_cell(2, 0, "A".to_string());
+        sheet.set_cell(0, 1, "10".to_string());
+        sheet.set_cell(1, 1, "20".to_string());
+        sheet.set_cell(2, 1, "30".to_string());
+
+        // Test with numeric criteria first (simpler case)
+        sheet.set_cell(0, 2, "10".to_string());
+        sheet.set_cell(1, 2, "20".to_string());
+        sheet.set_cell(2, 2, "10".to_string());
+        
+        // Test the simpler case without sum_range (criteria range = sum range)
+        assert_eq!(sheet.evaluate_formula("=SUMIF(B1:B3,\">15\")", 0, 0), "50"); // Sum range = criteria range: 20 + 30 = 50
+        
+        // Now test with separate sum range
+        assert_eq!(sheet.evaluate_formula("=SUMIF(C1:C3,\"10\",B1:B3)", 0, 0), "40"); // Sum where C1:C3 = "10" -> B1 + B3 = 10 + 30 = 40
+        
+        // Now test with text criteria
+        assert_eq!(sheet.evaluate_formula("=SUMIF(A1:A3,\"A\",B1:B3)", 0, 0), "40"); // Sum where A1:A3 = "A"
+        assert_eq!(sheet.evaluate_formula("=sumif(A1:A3,\"A\",B1:B3)", 0, 0), "40"); // case insensitive
+    }
+
+    #[test]
+    fn test_evaluate_averageif() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "10".to_string());
+        sheet.set_cell(1, 0, "20".to_string());
+        sheet.set_cell(2, 0, "10".to_string());
+        sheet.set_cell(3, 0, "30".to_string());
+
+        assert_eq!(sheet.evaluate_formula("=AVERAGEIF(A1:A4,\">15\")", 0, 0), "25"); // Average of 20 and 30
+        assert_eq!(sheet.evaluate_formula("=AVERAGEIF(A1:A4,\"10\")", 0, 0), "10");
+        assert_eq!(sheet.evaluate_formula("=averageif(A1:A4,\">15\")", 0, 0), "25"); // case insensitive
+    }
+
+    #[test]
+    fn test_evaluate_round() {
+        let mut sheet = Spreadsheet::new();
+        assert_eq!(sheet.evaluate_formula("=ROUND(3.14159,2)", 0, 0), "3.14");
+        assert_eq!(sheet.evaluate_formula("=ROUND(3.14159,0)", 0, 0), "3");
+        assert_eq!(sheet.evaluate_formula("=ROUND(3.5,0)", 0, 0), "4");
+        assert_eq!(sheet.evaluate_formula("=round(3.14159,2)", 0, 0), "3.14"); // case insensitive
+    }
+
+    #[test]
+    fn test_evaluate_concatenate() {
+        let mut sheet = Spreadsheet::new();
+        assert_eq!(sheet.evaluate_formula("=CONCATENATE(\"Hello\",\" \",\"World\")", 0, 0), "Hello World");
+        assert_eq!(sheet.evaluate_formula("=CONCAT(\"A\",\"B\",\"C\")", 0, 0), "ABC");
+        assert_eq!(sheet.evaluate_formula("=concatenate(\"Hello\",\"World\")", 0, 0), "HelloWorld"); // case insensitive
+        
+        sheet.set_cell(0, 0, "Hello".to_string());
+        sheet.set_cell(0, 1, "World".to_string());
+        assert_eq!(sheet.evaluate_formula("=CONCATENATE(A1,\" \",B1)", 0, 0), "Hello World");
+    }
+
+    #[test]
+    fn test_evaluate_left() {
+        let mut sheet = Spreadsheet::new();
+        assert_eq!(sheet.evaluate_formula("=LEFT(\"Hello World\",5)", 0, 0), "Hello");
+        assert_eq!(sheet.evaluate_formula("=LEFT(\"Hello\",10)", 0, 0), "Hello"); // More chars than available
+        assert_eq!(sheet.evaluate_formula("=left(\"Hello\",3)", 0, 0), "Hel"); // case insensitive
+        
+        sheet.set_cell(0, 0, "Hello World".to_string());
+        assert_eq!(sheet.evaluate_formula("=LEFT(A1,5)", 0, 0), "Hello");
+    }
+
+    #[test]
+    fn test_evaluate_right() {
+        let mut sheet = Spreadsheet::new();
+        assert_eq!(sheet.evaluate_formula("=RIGHT(\"Hello World\",5)", 0, 0), "World");
+        assert_eq!(sheet.evaluate_formula("=RIGHT(\"Hello\",10)", 0, 0), "Hello"); // More chars than available
+        assert_eq!(sheet.evaluate_formula("=right(\"Hello\",3)", 0, 0), "llo"); // case insensitive
+        
+        sheet.set_cell(0, 0, "Hello World".to_string());
+        assert_eq!(sheet.evaluate_formula("=RIGHT(A1,5)", 0, 0), "World");
+    }
+
+    #[test]
+    fn test_evaluate_mid() {
+        let mut sheet = Spreadsheet::new();
+        assert_eq!(sheet.evaluate_formula("=MID(\"Hello World\",7,5)", 0, 0), "World");
+        assert_eq!(sheet.evaluate_formula("=MID(\"Hello World\",1,5)", 0, 0), "Hello");
+        assert_eq!(sheet.evaluate_formula("=MID(\"Hello\",3,10)", 0, 0), "llo"); // More chars than available
+        assert_eq!(sheet.evaluate_formula("=mid(\"Hello\",2,3)", 0, 0), "ell"); // case insensitive
+        
+        sheet.set_cell(0, 0, "Hello World".to_string());
+        assert_eq!(sheet.evaluate_formula("=MID(A1,7,5)", 0, 0), "World");
+    }
+
+    #[test]
+    fn test_evaluate_len() {
+        let mut sheet = Spreadsheet::new();
+        assert_eq!(sheet.evaluate_formula("=LEN(\"Hello\")", 0, 0), "5");
+        assert_eq!(sheet.evaluate_formula("=LEN(\"\")", 0, 0), "0");
+        assert_eq!(sheet.evaluate_formula("=LEN(\"Hello World\")", 0, 0), "11");
+        assert_eq!(sheet.evaluate_formula("=len(\"Hello\")", 0, 0), "5"); // case insensitive
+        
+        sheet.set_cell(0, 0, "Hello World".to_string());
+        assert_eq!(sheet.evaluate_formula("=LEN(A1)", 0, 0), "11");
+    }
+
+    #[test]
+    fn test_evaluate_vlookup() {
+        let mut sheet = Spreadsheet::new();
+        // Set up a lookup table: A1:B3
+        // A1=1, B1=100
+        // A2=2, B2=200
+        // A3=3, B3=300
+        sheet.set_cell(0, 0, "1".to_string());
+        sheet.set_cell(0, 1, "100".to_string());
+        sheet.set_cell(1, 0, "2".to_string());
+        sheet.set_cell(1, 1, "200".to_string());
+        sheet.set_cell(2, 0, "3".to_string());
+        sheet.set_cell(2, 1, "300".to_string());
+
+        assert_eq!(sheet.evaluate_formula("=VLOOKUP(2,A1:B3,2)", 0, 0), "200");
+        assert_eq!(sheet.evaluate_formula("=VLOOKUP(1,A1:B3,2)", 0, 0), "100");
+        assert_eq!(sheet.evaluate_formula("=VLOOKUP(3,A1:B3,2)", 0, 0), "300");
+        assert_eq!(sheet.evaluate_formula("=vlookup(2,A1:B3,2)", 0, 0), "200"); // case insensitive
+        
+        // Test with text lookup
+        sheet.set_cell(0, 0, "Apple".to_string());
+        sheet.set_cell(0, 1, "Red".to_string());
+        sheet.set_cell(1, 0, "Banana".to_string());
+        sheet.set_cell(1, 1, "Yellow".to_string());
+        assert_eq!(sheet.evaluate_formula("=VLOOKUP(\"Banana\",A1:B2,2)", 0, 0), "Yellow");
     }
 }

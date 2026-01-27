@@ -5,7 +5,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 
 use crate::constants::COLOR_PALETTE;
 use crate::spreadsheet::Spreadsheet;
-use crate::types::{RowColumnSelectMode, SaveFormat, TextAlignment, VerticalAlignment, VisualSubMode};
+use crate::types::{DataType, RowColumnSelectMode, SaveFormat, TextAlignment, VerticalAlignment, VisualSubMode};
 use crate::ui;
 
 pub fn run_app(
@@ -20,6 +20,16 @@ pub fn run_app(
             Ok(Event::Key(key)) => {
                 if key.kind != KeyEventKind::Press {
                     continue;
+                }
+
+                // Debug: log key events to a file to diagnose Cmd+Arrow issue
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("/tmp/rustxl_keys.log")
+                {
+                    use std::io::Write;
+                    let _ = writeln!(file, "Key: {:?}, Modifiers: {:?}", key.code, key.modifiers);
                 }
 
                 if spreadsheet.editing {
@@ -179,6 +189,7 @@ fn handle_visual_mode(spreadsheet: &mut Spreadsheet, code: KeyCode) {
         VisualSubMode::TextAlignment => handle_visual_text_alignment(spreadsheet, code),
         VisualSubMode::VerticalAlignment => handle_visual_vertical_alignment(spreadsheet, code),
         VisualSubMode::FontSize => handle_visual_font_size(spreadsheet, code),
+        VisualSubMode::DataType => handle_visual_data_type(spreadsheet, code),
     }
 }
 
@@ -204,6 +215,9 @@ fn handle_visual_main(spreadsheet: &mut Spreadsheet, code: KeyCode) {
         }
         KeyCode::Char('s') | KeyCode::Char('S') => {
             spreadsheet.visual_sub_mode = VisualSubMode::FontSize;
+        }
+        KeyCode::Char('t') | KeyCode::Char('T') => {
+            spreadsheet.visual_sub_mode = VisualSubMode::DataType;
         }
         KeyCode::Char('c') | KeyCode::Char('C') => {
             spreadsheet.clear_formatting_from_selection();
@@ -341,6 +355,41 @@ fn handle_visual_font_size(spreadsheet: &mut Spreadsheet, code: KeyCode) {
     }
 }
 
+fn handle_visual_data_type(spreadsheet: &mut Spreadsheet, code: KeyCode) {
+    match code {
+        KeyCode::Char('1') => {
+            spreadsheet.apply_data_type_to_selection(Some(DataType::Text));
+            spreadsheet.visual_sub_mode = VisualSubMode::Main;
+        }
+        KeyCode::Char('2') => {
+            spreadsheet.apply_data_type_to_selection(Some(DataType::Number));
+            spreadsheet.visual_sub_mode = VisualSubMode::Main;
+        }
+        KeyCode::Char('3') => {
+            spreadsheet.apply_data_type_to_selection(Some(DataType::Currency));
+            spreadsheet.visual_sub_mode = VisualSubMode::Main;
+        }
+        KeyCode::Char('4') => {
+            spreadsheet.apply_data_type_to_selection(Some(DataType::Percentage));
+            spreadsheet.visual_sub_mode = VisualSubMode::Main;
+        }
+        KeyCode::Char('5') => {
+            spreadsheet.apply_data_type_to_selection(Some(DataType::Date));
+            spreadsheet.visual_sub_mode = VisualSubMode::Main;
+        }
+        KeyCode::Char('6') => {
+            spreadsheet.apply_data_type_to_selection(Some(DataType::Time));
+            spreadsheet.visual_sub_mode = VisualSubMode::Main;
+        }
+        KeyCode::Char('0') => {
+            spreadsheet.apply_data_type_to_selection(None);
+            spreadsheet.visual_sub_mode = VisualSubMode::Main;
+        }
+        KeyCode::Esc => spreadsheet.visual_sub_mode = VisualSubMode::Main,
+        _ => {}
+    }
+}
+
 fn handle_ready_mode(
     spreadsheet: &mut Spreadsheet,
     code: KeyCode,
@@ -348,6 +397,8 @@ fn handle_ready_mode(
 ) -> bool {
     let shift = modifiers.contains(KeyModifiers::SHIFT);
     let ctrl_or_cmd = modifiers.contains(KeyModifiers::CONTROL) || modifiers.contains(KeyModifiers::SUPER);
+    let cmd = modifiers.contains(KeyModifiers::SUPER);
+    let alt = modifiers.contains(KeyModifiers::ALT);
     
     match code {
         // Copy (Ctrl+C / Cmd+C)
@@ -361,6 +412,81 @@ fn handle_ready_mode(
         // Paste (Ctrl+V / Cmd+V)
         KeyCode::Char('v') if ctrl_or_cmd => {
             spreadsheet.paste();
+        }
+        // Cmd+Arrow or Alt+Arrow: Jump to last data column/row
+        // On macOS, Cmd+Arrow might be intercepted by the system, so Alt+Arrow is more reliable
+        KeyCode::Right if cmd || alt => {
+            spreadsheet.jump_to_last_col();
+            return false; // Stay in ready mode
+        }
+        KeyCode::Left if cmd || alt => {
+            spreadsheet.jump_to_first_col();
+            return false; // Stay in ready mode
+        }
+        KeyCode::Down if cmd || alt => {
+            spreadsheet.jump_to_last_row();
+            return false; // Stay in ready mode
+        }
+        KeyCode::Up if cmd || alt => {
+            spreadsheet.jump_to_first_row();
+            return false; // Stay in ready mode
+        }
+        // Workaround for macOS: Cmd+Arrow sends special characters via terminal
+        // Cmd+Right sends End (0x05 = Ctrl+E in Emacs)
+        // Cmd+Left sends Home (0x01 = Ctrl+A in Emacs)  
+        // Cmd+Down sends End of buffer (Ctrl+N or similar)
+        // Cmd+Up sends Beginning of buffer (Ctrl+P or similar)
+        KeyCode::End => {
+            spreadsheet.jump_to_last_col();
+            return false;
+        }
+        KeyCode::Home => {
+            spreadsheet.jump_to_first_col();
+            return false;
+        }
+        // PageDown/PageUp for jumping to last/first row (alternative to Cmd+Down/Up)
+        KeyCode::PageDown => {
+            spreadsheet.jump_to_last_row();
+            return false;
+        }
+        KeyCode::PageUp => {
+            spreadsheet.jump_to_first_row();
+            return false;
+        }
+        // Handle Ctrl+E / Ctrl+A (Emacs keybindings, also sent by some terminals for Cmd+Arrow)
+        KeyCode::Char('e') if ctrl_or_cmd => {
+            spreadsheet.jump_to_last_col();
+            return false;
+        }
+        KeyCode::Char('a') if ctrl_or_cmd => {
+            spreadsheet.jump_to_first_col();
+            return false;
+        }
+        // Handle Ctrl+N / Ctrl+P (Emacs keybindings for up/down, sent by terminals for Cmd+Up/Down)
+        KeyCode::Char('n') if ctrl_or_cmd => {
+            spreadsheet.jump_to_last_row();
+            return false;
+        }
+        KeyCode::Char('p') if ctrl_or_cmd => {
+            spreadsheet.jump_to_first_row();
+            return false;
+        }
+        // Also handle raw control characters that terminals may send
+        KeyCode::Char('\x05') => { // Ctrl+E / End of line
+            spreadsheet.jump_to_last_col();
+            return false;
+        }
+        KeyCode::Char('\x01') => { // Ctrl+A / Beginning of line
+            spreadsheet.jump_to_first_col();
+            return false;
+        }
+        KeyCode::Char('\x0E') => { // Ctrl+N / Next line
+            spreadsheet.jump_to_last_row();
+            return false;
+        }
+        KeyCode::Char('\x10') => { // Ctrl+P / Previous line
+            spreadsheet.jump_to_first_row();
+            return false;
         }
         KeyCode::Char('q') | KeyCode::Char('Q') => return true,
         KeyCode::Char('o') | KeyCode::Char('O') => spreadsheet.enter_open_mode(),

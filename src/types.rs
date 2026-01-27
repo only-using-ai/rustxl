@@ -16,6 +16,17 @@ pub enum VerticalAlignment {
     Bottom,
 }
 
+#[derive(Clone, Copy, PartialEq, Default)]
+pub enum DataType {
+    #[default]
+    Text,
+    Number,
+    Currency,
+    Percentage,
+    Date,
+    Time,
+}
+
 #[derive(Clone, Copy, Default)]
 pub struct CellStyle {
     pub fg: Option<Color>,
@@ -23,6 +34,7 @@ pub struct CellStyle {
     pub bold: bool,
     pub alignment: Option<TextAlignment>,
     pub vertical_alignment: Option<VerticalAlignment>,
+    pub data_type: Option<DataType>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -35,6 +47,7 @@ pub enum VisualSubMode {
     TextAlignment,
     VerticalAlignment,
     FontSize,
+    DataType,
 }
 
 #[derive(Clone, Copy, PartialEq)]
