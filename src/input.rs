@@ -1,4 +1,6 @@
 use std::io;
+use std::sync::mpsc::Receiver;
+use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{backend::CrosstermBackend, Terminal};
@@ -7,61 +9,124 @@ use crate::constants::COLOR_PALETTE;
 use crate::spreadsheet::Spreadsheet;
 use crate::types::{DataType, RowColumnSelectMode, SaveFormat, TextAlignment, VerticalAlignment, VisualSubMode};
 use crate::ui;
+use crate::update::{self, UpdateMessage};
 
 pub fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     mut spreadsheet: Spreadsheet,
+    update_rx: Receiver<UpdateMessage>,
 ) -> io::Result<()> {
 
     loop {
-        terminal.draw(|f| ui::render(f, &mut spreadsheet))?;
-
-        match event::read() {
-            Ok(Event::Key(key)) => {
-                if key.kind != KeyEventKind::Press {
-                    continue;
+        // Check for update messages (non-blocking)
+        if let Ok(msg) = update_rx.try_recv() {
+            match msg {
+                UpdateMessage::Available(info) => {
+                    spreadsheet.update_available = Some(info);
+                    spreadsheet.update_prompt_shown = true;
                 }
-
-                if spreadsheet.editing {
-                    handle_editing_mode(&mut spreadsheet, key.code, key.modifiers);
-                } else if spreadsheet.command_mode {
-                    if handle_command_mode(&mut spreadsheet, key.code) {
-                        return Ok(());
-                    }
-                } else if spreadsheet.open_mode {
-                    if handle_open_mode(&mut spreadsheet, key.code) {
-                        continue;
-                    }
-                } else if spreadsheet.save_mode {
-                    if handle_save_mode(&mut spreadsheet, key.code) {
-                        continue;
-                    }
-                } else if spreadsheet.visual_mode {
-                    handle_visual_mode(&mut spreadsheet, key.code);
-                } else if spreadsheet.row_column_select_mode != RowColumnSelectMode::None {
-                    handle_row_column_select_mode(&mut spreadsheet, key.code, key.modifiers);
-                } else if spreadsheet.find_mode {
-                    handle_find_mode(&mut spreadsheet, key.code, key.modifiers);
-                } else {
-                    if handle_ready_mode(&mut spreadsheet, key.code, key.modifiers) {
-                        return Ok(());
-                    }
+                UpdateMessage::NotAvailable => {}
+                UpdateMessage::Error(_) => {
+                    // Silently ignore update check errors
                 }
-            }
-            Ok(_) => {} // Ignore non-key events
-            Err(e) => {
-                // If we can't read events, it might be a terminal issue
-                // Try to restore terminal and exit gracefully
-                let _ = crossterm::terminal::disable_raw_mode();
-                let _ = crossterm::execute!(
-                    terminal.backend_mut(),
-                    crossterm::terminal::LeaveAlternateScreen,
-                    crossterm::event::DisableMouseCapture
-                );
-                let _ = terminal.show_cursor();
-                return Err(e);
             }
         }
+
+        terminal.draw(|f| ui::render(f, &mut spreadsheet))?;
+
+        // Use poll with timeout to allow checking update messages periodically
+        if event::poll(Duration::from_millis(100))? {
+            match event::read() {
+                Ok(Event::Key(key)) => {
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
+
+                    // Handle update prompt first if shown
+                    if spreadsheet.update_prompt_shown && !spreadsheet.update_in_progress {
+                        if handle_update_prompt(&mut spreadsheet, key.code) {
+                            continue;
+                        }
+                    }
+
+                    if spreadsheet.editing {
+                        handle_editing_mode(&mut spreadsheet, key.code, key.modifiers);
+                    } else if spreadsheet.command_mode {
+                        if handle_command_mode(&mut spreadsheet, key.code) {
+                            return Ok(());
+                        }
+                    } else if spreadsheet.open_mode {
+                        if handle_open_mode(&mut spreadsheet, key.code) {
+                            continue;
+                        }
+                    } else if spreadsheet.save_mode {
+                        if handle_save_mode(&mut spreadsheet, key.code) {
+                            continue;
+                        }
+                    } else if spreadsheet.visual_mode {
+                        handle_visual_mode(&mut spreadsheet, key.code);
+                    } else if spreadsheet.row_column_select_mode != RowColumnSelectMode::None {
+                        handle_row_column_select_mode(&mut spreadsheet, key.code, key.modifiers);
+                    } else if spreadsheet.find_mode {
+                        handle_find_mode(&mut spreadsheet, key.code, key.modifiers);
+                    } else {
+                        if handle_ready_mode(&mut spreadsheet, key.code, key.modifiers) {
+                            return Ok(());
+                        }
+                    }
+                }
+                Ok(_) => {} // Ignore non-key events
+                Err(e) => {
+                    // If we can't read events, it might be a terminal issue
+                    // Try to restore terminal and exit gracefully
+                    let _ = crossterm::terminal::disable_raw_mode();
+                    let _ = crossterm::execute!(
+                        terminal.backend_mut(),
+                        crossterm::terminal::LeaveAlternateScreen,
+                        crossterm::event::DisableMouseCapture
+                    );
+                    let _ = terminal.show_cursor();
+                    return Err(e);
+                }
+            }
+        }
+    }
+}
+
+/// Handle update prompt (y/n)
+/// Returns true if the key was handled by the update prompt
+fn handle_update_prompt(spreadsheet: &mut Spreadsheet, code: KeyCode) -> bool {
+    match code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            if let Some(ref update_info) = spreadsheet.update_available.clone() {
+                spreadsheet.update_in_progress = true;
+                spreadsheet.update_message = Some("Downloading update...".to_string());
+
+                // Perform the update
+                match update::download_and_install(update_info) {
+                    Ok(()) => {
+                        spreadsheet.update_message = Some(format!(
+                            "Updated to {}! Please restart xl to use the new version.",
+                            update_info.latest_version
+                        ));
+                        spreadsheet.update_in_progress = false;
+                        spreadsheet.update_prompt_shown = false;
+                    }
+                    Err(e) => {
+                        spreadsheet.update_message = Some(format!("Update failed: {}", e));
+                        spreadsheet.update_in_progress = false;
+                        spreadsheet.update_prompt_shown = false;
+                    }
+                }
+            }
+            true
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            spreadsheet.update_prompt_shown = false;
+            spreadsheet.update_message = None;
+            true
+        }
+        _ => false,
     }
 }
 

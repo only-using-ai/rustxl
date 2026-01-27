@@ -12,3 +12,9 @@ calamine = "0.24"
 atty = "0.2"
 dirs = "5.0"
 arboard = "3.4"
+reqwest = { version = "0.12", features = ["blocking", "json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+semver = "1.0"
+flate2 = "1.0"
+tar = "0.4"

@@ -7,6 +7,7 @@ mod spreadsheet;
 mod style;
 mod types;
 mod ui;
+mod update;
 
 use std::io::{self, Read};
 
@@ -126,14 +127,17 @@ fn main() -> io::Result<()> {
         }
     }
     
+    // Spawn update checker in background
+    let update_rx = update::spawn_update_checker();
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Run app with pre-loaded spreadsheet
-    let res = input::run_app(&mut terminal, spreadsheet);
+    // Run app with pre-loaded spreadsheet and update receiver
+    let res = input::run_app(&mut terminal, spreadsheet, update_rx);
 
     // Restore terminal
     disable_raw_mode()?;

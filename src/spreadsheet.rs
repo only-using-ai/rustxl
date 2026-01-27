@@ -4,6 +4,7 @@ use ratatui::layout::Rect;
 
 use crate::constants::{DEFAULT_COLS, DEFAULT_ROWS};
 use crate::types::{CellStyle, RowColumnSelectMode, SaveFormat, VisualSubMode};
+use crate::update::UpdateInfo;
 
 /// Represents copied/cut cell data with relative positions
 #[derive(Clone)]
@@ -68,6 +69,11 @@ pub struct Spreadsheet {
     pub command_mode: bool,
     pub command_buffer: String,
     pub command_message: Option<String>,
+    // Update mode
+    pub update_available: Option<UpdateInfo>,
+    pub update_prompt_shown: bool,
+    pub update_in_progress: bool,
+    pub update_message: Option<String>,
 }
 
 impl Spreadsheet {
@@ -113,6 +119,10 @@ impl Spreadsheet {
             command_mode: false,
             command_buffer: String::new(),
             command_message: None,
+            update_available: None,
+            update_prompt_shown: false,
+            update_in_progress: false,
+            update_message: None,
         }
     }
 

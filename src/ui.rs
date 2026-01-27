@@ -69,30 +69,47 @@ pub fn render(f: &mut Frame, spreadsheet: &mut Spreadsheet) {
 
     // Check if we have selection stats to show
     let has_stats = spreadsheet.get_selection_stats().is_some();
+    // Check if we need to show update prompt or message
+    let has_update = spreadsheet.update_prompt_shown || spreadsheet.update_message.is_some();
 
-    let chunks = if has_stats {
-        Layout::vertical([
+    let chunks = match (has_stats, has_update) {
+        (true, true) => Layout::vertical([
+            Constraint::Length(3),
+            Constraint::Min(5),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(area),
+        (true, false) => Layout::vertical([
             Constraint::Length(3),
             Constraint::Min(5),
             Constraint::Length(1),
             Constraint::Length(1),
         ])
-        .split(area)
-    } else {
-        Layout::vertical([
+        .split(area),
+        (false, true) => Layout::vertical([
+            Constraint::Length(3),
+            Constraint::Min(5),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(area),
+        (false, false) => Layout::vertical([
             Constraint::Length(3),
             Constraint::Min(5),
             Constraint::Length(1),
         ])
-        .split(area)
+        .split(area),
     };
 
     let formula_bar_area = chunks[0];
     let grid_area = chunks[1];
-    let (stats_area, status_area) = if has_stats {
-        (Some(chunks[2]), chunks[3])
-    } else {
-        (None, chunks[2])
+    let (stats_area, update_area, status_area) = match (has_stats, has_update) {
+        (true, true) => (Some(chunks[2]), Some(chunks[3]), chunks[4]),
+        (true, false) => (Some(chunks[2]), None, chunks[3]),
+        (false, true) => (None, Some(chunks[2]), chunks[3]),
+        (false, false) => (None, None, chunks[2]),
     };
 
     spreadsheet.adjust_scroll(grid_area);
@@ -104,6 +121,9 @@ pub fn render(f: &mut Frame, spreadsheet: &mut Spreadsheet) {
     render_grid(f, spreadsheet, grid_area, visible_cols, visible_rows);
     if let Some(stats_area) = stats_area {
         render_stats_bar(f, spreadsheet, stats_area);
+    }
+    if let Some(update_area) = update_area {
+        render_update_bar(f, spreadsheet, update_area);
     }
     render_status_bar(f, spreadsheet, status_area);
 }
@@ -938,4 +958,65 @@ fn render_ready_status<'a>(mode: &'a str, mode_style: Style) -> Line<'a> {
         Span::styled("q", Style::default().fg(Color::White)),
         Span::styled(" Quit", Style::default().fg(Color::DarkGray)),
     ])
+}
+
+fn render_update_bar(f: &mut Frame, spreadsheet: &Spreadsheet, area: Rect) {
+    let line = if spreadsheet.update_in_progress {
+        Line::from(vec![
+            Span::styled(
+                " UPDATE ",
+                Style::default().bg(Color::Rgb(0, 150, 136)).fg(Color::White),
+            ),
+            Span::styled(
+                "  Downloading update...",
+                Style::default().fg(Color::Yellow),
+            ),
+        ])
+    } else if let Some(ref msg) = spreadsheet.update_message {
+        // Show update result message
+        let is_success = msg.contains("Updated to") || msg.contains("restart");
+        Line::from(vec![
+            Span::styled(
+                " UPDATE ",
+                Style::default().bg(Color::Rgb(0, 150, 136)).fg(Color::White),
+            ),
+            Span::styled(
+                format!("  {}", msg),
+                Style::default().fg(if is_success {
+                    Color::Green
+                } else {
+                    Color::Red
+                }),
+            ),
+        ])
+    } else if spreadsheet.update_prompt_shown {
+        if let Some(ref info) = spreadsheet.update_available {
+            Line::from(vec![
+                Span::styled(
+                    " UPDATE ",
+                    Style::default().bg(Color::Rgb(0, 150, 136)).fg(Color::White),
+                ),
+                Span::styled(
+                    format!(
+                        "  New version {} available (current: {})  ",
+                        info.latest_version, info.current_version
+                    ),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::styled("y", Style::default().fg(Color::Yellow)),
+                Span::styled(" Update  ", Style::default().fg(Color::DarkGray)),
+                Span::styled("n", Style::default().fg(Color::Yellow)),
+                Span::styled(" Skip", Style::default().fg(Color::DarkGray)),
+            ])
+        } else {
+            Line::default()
+        }
+    } else {
+        Line::default()
+    };
+
+    f.render_widget(
+        Paragraph::new(line).style(Style::default().bg(Color::Rgb(35, 45, 45))),
+        area,
+    );
 }
