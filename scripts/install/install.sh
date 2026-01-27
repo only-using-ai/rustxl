@@ -144,25 +144,109 @@ main() {
     
     echo "Downloading rustxl..."
     
-    # Download the archive
+    # Download the archive with error checking
+    HTTP_CODE=0
     if command_exists curl; then
-        curl -L -o "$TEMP_DIR/$ARCHIVE_NAME" "$DOWNLOAD_URL"
+        HTTP_CODE=$(curl -L -w "%{http_code}" -o "$TEMP_DIR/$ARCHIVE_NAME" -f "$DOWNLOAD_URL" 2>/dev/null | tail -n1)
+        CURL_EXIT=$?
+        if [ $CURL_EXIT -ne 0 ] || [ "$HTTP_CODE" != "200" ]; then
+            echo -e "${RED}Error: Download failed${NC}"
+            if [ "$HTTP_CODE" != "200" ] && [ -n "$HTTP_CODE" ]; then
+                echo "HTTP status code: $HTTP_CODE"
+            fi
+            if [ -f "$TEMP_DIR/$ARCHIVE_NAME" ]; then
+                echo "Downloaded content (first 500 chars):"
+                head -c 500 "$TEMP_DIR/$ARCHIVE_NAME" 2>/dev/null || true
+                echo ""
+            fi
+            exit 1
+        fi
     else
-        wget -O "$TEMP_DIR/$ARCHIVE_NAME" "$DOWNLOAD_URL"
+        # Use wget with better error handling
+        if ! wget -O "$TEMP_DIR/$ARCHIVE_NAME" "$DOWNLOAD_URL" 2>&1; then
+            echo -e "${RED}Error: Download failed${NC}"
+            if [ -f "$TEMP_DIR/$ARCHIVE_NAME" ]; then
+                echo "Downloaded content (first 500 chars):"
+                head -c 500 "$TEMP_DIR/$ARCHIVE_NAME" 2>/dev/null || true
+                echo ""
+            fi
+            exit 1
+        fi
     fi
     
     if [ ! -f "$TEMP_DIR/$ARCHIVE_NAME" ]; then
-        echo -e "${RED}Error: Download failed${NC}"
+        echo -e "${RED}Error: Download failed - file not found${NC}"
         exit 1
     fi
     
-    echo -e "${GREEN}Download complete!${NC}"
+    # Verify the downloaded file is actually a tar.gz archive
+    # Check if it's an HTML error page (common when release doesn't exist)
+    if head -c 100 "$TEMP_DIR/$ARCHIVE_NAME" 2>/dev/null | grep -q "<!DOCTYPE html\|<html\|404\|Not Found"; then
+        echo -e "${RED}Error: Downloaded file appears to be an HTML error page${NC}"
+        echo "This usually means the release doesn't exist yet or the URL is incorrect."
+        echo ""
+        echo "First few lines of downloaded content:"
+        head -n 10 "$TEMP_DIR/$ARCHIVE_NAME" 2>/dev/null || true
+        echo ""
+        echo "Please check:"
+        echo "  1. That a release with tag 'latest' exists at: https://github.com/only-using-ai/rustxl/releases"
+        echo "  2. That the release includes the file: $ARCHIVE_NAME"
+        exit 1
+    fi
+    
+    # Verify file type if 'file' command is available
+    if command_exists file; then
+        FILE_TYPE=$(file -b "$TEMP_DIR/$ARCHIVE_NAME" 2>/dev/null || echo "unknown")
+        if [[ "$FILE_TYPE" =~ (HTML|text) ]] && [[ ! "$FILE_TYPE" =~ (gzip|tar|archive) ]]; then
+            echo -e "${RED}Error: Downloaded file appears to be text/HTML, not an archive${NC}"
+            echo "File type: $FILE_TYPE"
+            echo "First few lines:"
+            head -n 5 "$TEMP_DIR/$ARCHIVE_NAME" 2>/dev/null || true
+            exit 1
+        fi
+    fi
+    
+    # Check file size (should be > 0 and reasonable)
+    if [ "$(uname)" = "Darwin" ]; then
+        FILE_SIZE=$(stat -f%z "$TEMP_DIR/$ARCHIVE_NAME" 2>/dev/null || echo "0")
+    else
+        FILE_SIZE=$(stat -c%s "$TEMP_DIR/$ARCHIVE_NAME" 2>/dev/null || echo "0")
+    fi
+    
+    if [ "$FILE_SIZE" -lt 1000 ]; then
+        echo -e "${RED}Error: Downloaded file is too small ($FILE_SIZE bytes), likely an error page${NC}"
+        echo "File content:"
+        head -c 500 "$TEMP_DIR/$ARCHIVE_NAME" 2>/dev/null || true
+        echo ""
+        exit 1
+    fi
+    
+    # Format file size for display
+    if command_exists numfmt; then
+        FILE_SIZE_DISPLAY=$(numfmt --to=iec-i --suffix=B $FILE_SIZE 2>/dev/null || echo "${FILE_SIZE} bytes")
+    else
+        FILE_SIZE_DISPLAY="${FILE_SIZE} bytes"
+    fi
+    
+    echo -e "${GREEN}Download complete! ($FILE_SIZE_DISPLAY)${NC}"
     echo ""
     
     # Extract the archive
     echo "Extracting archive..."
     cd "$TEMP_DIR"
-    tar -xzf "$ARCHIVE_NAME"
+    
+    # Try to extract and check for errors
+    if ! tar -xzf "$ARCHIVE_NAME" 2>&1; then
+        echo -e "${RED}Error: Failed to extract archive${NC}"
+        echo "This might indicate:"
+        echo "  - The downloaded file is corrupted"
+        echo "  - The file is not a valid tar.gz archive"
+        echo "  - The download was incomplete"
+        echo ""
+        echo "File type: $(file -b "$ARCHIVE_NAME" 2>/dev/null || echo "unknown")"
+        echo "File size: $FILE_SIZE bytes"
+        exit 1
+    fi
     
     # Find the extracted directory
     EXTRACTED_DIR=$(find . -maxdepth 1 -type d -name "xl-*" | head -n 1)
