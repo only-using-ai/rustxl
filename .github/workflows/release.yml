@@ -3,8 +3,8 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'  # Triggers on version tags like v1.0.0
-  workflow_dispatch:  # Allows manual triggering
+      - "v*" # Triggers on version tags like v1.0.0
+  workflow_dispatch: # Allows manual triggering
 
 env:
   CARGO_TERM_COLOR: always
@@ -23,26 +23,26 @@ jobs:
             target: x86_64-unknown-linux-gnu
             artifact_name: xl-linux-x86_64
             asset_name: xl-linux-x86_64.tar.gz
-            
+
           - os: ubuntu-latest
             arch: aarch64
             target: aarch64-unknown-linux-gnu
             artifact_name: xl-linux-aarch64
             asset_name: xl-linux-aarch64.tar.gz
-            
+
           # macOS targets (GitHub Actions macOS runners are ARM64, but we can cross-compile)
           - os: macos-latest
             arch: x86_64
             target: x86_64-apple-darwin
             artifact_name: xl-macos-x86_64
             asset_name: xl-macos-x86_64.tar.gz
-            
+
           - os: macos-latest
             arch: arm64
             target: aarch64-apple-darwin
             artifact_name: xl-macos-arm64
             asset_name: xl-macos-arm64.tar.gz
-            
+
           # Windows targets
           - os: windows-latest
             arch: x86_64
@@ -128,7 +128,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -160,28 +160,28 @@ jobs:
           name: Release ${{ steps.tag.outputs.tag }}
           body: |
             ## Release ${{ steps.tag.outputs.tag }}
-            
+
             ### Downloads
-            
+
             **Linux:**
             - x86_64: `xl-linux-x86_64.tar.gz`
             - ARM64: `xl-linux-aarch64.tar.gz`
-            
+
             **macOS:**
             - Intel (x86_64): `xl-macos-x86_64.tar.gz`
             - Apple Silicon (ARM64): `xl-macos-arm64.tar.gz`
-            
+
             **Windows:**
             - x86_64: `xl-windows-x86_64.zip`
-            
+
             ### Installation
-            
+
             **Linux/macOS:**
             ```bash
             tar -xzf xl-*.tar.gz
             sudo mv xl /usr/local/bin/  # or add to your PATH
             ```
-            
+
             **Windows:**
             ```powershell
             Expand-Archive xl-windows-x86_64.zip
@@ -193,4 +193,4 @@ jobs:
           draft: false
           prerelease: ${{ contains(steps.tag.outputs.tag, '-') }}
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
