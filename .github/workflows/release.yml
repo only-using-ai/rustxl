@@ -144,6 +144,14 @@ jobs:
           TAG_NAME=${GITHUB_REF#refs/tags/}
           echo "tag=$TAG_NAME" >> $GITHUB_OUTPUT
 
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          # Copy all archive files to a flat directory structure
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec cp {} release-assets/ \;
+          echo "Release assets prepared:"
+          ls -lh release-assets/
+
       - name: Create Release
         id: create_release
         uses: softprops/action-gh-release@v1
@@ -180,8 +188,8 @@ jobs:
             # Add xl.exe to your PATH
             ```
           files: |
-            artifacts/*/xl-*.tar.gz
-            artifacts/*/xl-*.zip
+            release-assets/*.tar.gz
+            release-assets/*.zip
           draft: false
           prerelease: ${{ contains(steps.tag.outputs.tag, '-') }}
         env:
