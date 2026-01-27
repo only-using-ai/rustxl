@@ -35,13 +35,7 @@ We provide installation scripts that automatically detect your OS and architectu
 #### Linux/macOS
 
 ```bash
-# Download and run the installation script
-curl -fsSL https://raw.githubusercontent.com/only-using-ai/rustxl/main/scripts/install/install.sh | bash
-
-# Or download first, then run
-wget https://raw.githubusercontent.com/only-using-ai/rustxl/main/scripts/install/install.sh
-chmod +x install.sh
-./install.sh
+curl -fsSL http://rustxl.com/install.sh | bash
 ```
 
 The script will:
@@ -54,9 +48,7 @@ The script will:
 
 **PowerShell (Recommended):**
 ```powershell
-# Download and run
-Invoke-WebRequest -Uri https://raw.githubusercontent.com/only-using-ai/rustxl/main/scripts/install/install.ps1 -OutFile install.ps1
-.\install.ps1
+irm http://rustxl.com/install.ps1 | iex
 ```
 
 **Note:** If you encounter an execution policy error, run:
@@ -64,10 +56,9 @@ Invoke-WebRequest -Uri https://raw.githubusercontent.com/only-using-ai/rustxl/ma
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 ```
 
-**Batch Script (Alternative):**
+**Command Prompt (Alternative):**
 ```cmd
-powershell -Command "Invoke-WebRequest -Uri https://raw.githubusercontent.com/only-using-ai/rustxl/main/scripts/install/install.bat -OutFile install.bat"
-install.bat
+curl -fsSL http://rustxl.com/install.bat -o install.bat && install.bat
 ```
 
 The Windows scripts will:
