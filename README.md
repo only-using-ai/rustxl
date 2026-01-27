@@ -28,10 +28,69 @@
 
 ## Installation
 
+### Quick Install (Recommended)
+
+We provide installation scripts that automatically detect your OS and architecture, then download and install the appropriate pre-built binary.
+
+#### Linux/macOS
+
+```bash
+# Download and run the installation script
+curl -fsSL https://raw.githubusercontent.com/only-using-ai/rustxl/main/scripts/install/install.sh | bash
+
+# Or download first, then run
+wget https://raw.githubusercontent.com/only-using-ai/rustxl/main/scripts/install/install.sh
+chmod +x install.sh
+./install.sh
+```
+
+The script will:
+- Detect your OS (Linux/macOS) and architecture (x86_64/aarch64)
+- Download the appropriate release
+- Install `xl` to `/usr/local/bin` or `~/.local/bin`
+- Provide instructions if PATH configuration is needed
+
+#### Windows
+
+**PowerShell (Recommended):**
+```powershell
+# Download and run
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/only-using-ai/rustxl/main/scripts/install/install.ps1 -OutFile install.ps1
+.\install.ps1
+```
+
+**Note:** If you encounter an execution policy error, run:
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
+
+**Batch Script (Alternative):**
+```cmd
+powershell -Command "Invoke-WebRequest -Uri https://raw.githubusercontent.com/only-using-ai/rustxl/main/scripts/install/install.bat -OutFile install.bat"
+install.bat
+```
+
+The Windows scripts will:
+- Download the Windows x86_64 release
+- Install `xl.exe` to `%LOCALAPPDATA%\rustxl\bin`
+- Automatically add it to your PATH
+
+**Note:** You may need to restart your terminal after installation for PATH changes to take effect.
+
+### Manual Installation
+
+Download the appropriate pre-built binary from [GitHub Releases](https://github.com/only-using-ai/rustxl/releases):
+
+- **Linux**: `xl-linux-x86_64.tar.gz` or `xl-linux-aarch64.tar.gz`
+- **macOS**: `xl-macos-x86_64.tar.gz` or `xl-macos-arm64.tar.gz`
+- **Windows**: `xl-windows-x86_64.zip`
+
+Extract the archive and move the binary (`xl` or `xl.exe`) to a directory in your PATH.
+
 ### From source
 
 ```bash
-git clone https://github.com/yourusername/rustxl.git
+git clone https://github.com/only-using-ai/rustxl.git
 cd rustxl
 cargo build --release
 ```
