@@ -1,5 +1,7 @@
 use ratatui::style::Color;
 
+pub const VERSION: &str = "0.1.3";
+
 pub const DEFAULT_ROWS: usize = 100;
 pub const DEFAULT_COLS: usize = 26;
 pub const DEFAULT_COL_WIDTH: u16 = 10;

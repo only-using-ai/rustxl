@@ -25,6 +25,9 @@ struct Args {
     /// File to open (supports CSV, TSV, and Excel files)
     #[arg(short, long)]
     file: Option<String>,
+    /// Print version information and exit
+    #[arg(short = 'V', long = "version")]
+    version: bool,
 }
 
 /// Reads all data from stdin into a buffer when stdin is piped.
@@ -83,6 +86,12 @@ mod tests {
 
 fn main() -> io::Result<()> {
     let args = Args::parse();
+
+    // Handle version flag
+    if args.version {
+        println!("{}", constants::VERSION);
+        return Ok(());
+    }
 
     // CRITICAL: Read all piped data from stdin FIRST, before any terminal setup.
     // The use-dev-tty feature makes crossterm read from /dev/tty directly,
