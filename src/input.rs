@@ -22,18 +22,12 @@ pub fn run_app(
                     continue;
                 }
 
-                // Debug: log key events to a file to diagnose Cmd+Arrow issue
-                if let Ok(mut file) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("/tmp/rustxl_keys.log")
-                {
-                    use std::io::Write;
-                    let _ = writeln!(file, "Key: {:?}, Modifiers: {:?}", key.code, key.modifiers);
-                }
-
                 if spreadsheet.editing {
                     handle_editing_mode(&mut spreadsheet, key.code, key.modifiers);
+                } else if spreadsheet.command_mode {
+                    if handle_command_mode(&mut spreadsheet, key.code) {
+                        return Ok(());
+                    }
                 } else if spreadsheet.open_mode {
                     if handle_open_mode(&mut spreadsheet, key.code) {
                         continue;
@@ -509,6 +503,10 @@ fn handle_ready_mode(
         }
         KeyCode::Delete | KeyCode::Backspace => spreadsheet.delete_cell(),
         KeyCode::Tab => spreadsheet.enter_visual_mode(),
+        // Enter command mode with colon (vim-style)
+        KeyCode::Char(':') => {
+            spreadsheet.enter_command_mode();
+        }
         KeyCode::Char(c) => {
             spreadsheet.clear_selection();
             spreadsheet.start_editing();
@@ -663,6 +661,37 @@ fn handle_find_mode(spreadsheet: &mut Spreadsheet, code: KeyCode, modifiers: Key
         }
         _ => {}
     }
+}
+
+/// Handle command mode (vim-style :command)
+/// Returns true if the app should quit
+fn handle_command_mode(spreadsheet: &mut Spreadsheet, code: KeyCode) -> bool {
+    match code {
+        KeyCode::Char(c) => {
+            spreadsheet.command_buffer.push(c);
+            spreadsheet.command_message = None;
+        }
+        KeyCode::Backspace => {
+            if spreadsheet.command_buffer.is_empty() {
+                spreadsheet.exit_command_mode();
+            } else {
+                spreadsheet.command_buffer.pop();
+                spreadsheet.command_message = None;
+            }
+        }
+        KeyCode::Enter => {
+            if spreadsheet.command_buffer.is_empty() {
+                spreadsheet.exit_command_mode();
+            } else {
+                return spreadsheet.execute_command();
+            }
+        }
+        KeyCode::Esc => {
+            spreadsheet.exit_command_mode();
+        }
+        _ => {}
+    }
+    false
 }
 
 #[cfg(test)]

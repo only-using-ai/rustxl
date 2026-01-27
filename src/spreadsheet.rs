@@ -64,6 +64,10 @@ pub struct Spreadsheet {
     pub find_matches: Vec<(usize, usize)>, // List of (row, col) matching the query
     // Clipboard (internal for cut tracking)
     pub clipboard_data: Option<ClipboardData>,
+    // Command mode (vim-style :command)
+    pub command_mode: bool,
+    pub command_buffer: String,
+    pub command_message: Option<String>,
 }
 
 impl Spreadsheet {
@@ -106,7 +110,94 @@ impl Spreadsheet {
             find_query: String::new(),
             find_matches: Vec::new(),
             clipboard_data: None,
+            command_mode: false,
+            command_buffer: String::new(),
+            command_message: None,
         }
+    }
+
+    pub fn enter_command_mode(&mut self) {
+        self.command_mode = true;
+        self.command_buffer.clear();
+        self.command_message = None;
+    }
+
+    pub fn exit_command_mode(&mut self) {
+        self.command_mode = false;
+        self.command_buffer.clear();
+        self.command_message = None;
+    }
+
+    /// Parse a cell reference like "A1", "B23", "AA5" and return (row, col)
+    pub fn parse_cell_reference(input: &str) -> Option<(usize, usize)> {
+        let input = input.trim().to_uppercase();
+        if input.is_empty() {
+            return None;
+        }
+
+        // Find where letters end and numbers begin
+        let mut col_str = String::new();
+        let mut row_str = String::new();
+
+        for c in input.chars() {
+            if c.is_ascii_alphabetic() {
+                if !row_str.is_empty() {
+                    // Letters after numbers is invalid
+                    return None;
+                }
+                col_str.push(c);
+            } else if c.is_ascii_digit() {
+                row_str.push(c);
+            } else {
+                return None; // Invalid character
+            }
+        }
+
+        if col_str.is_empty() || row_str.is_empty() {
+            return None;
+        }
+
+        // Convert column letters to index (A=0, B=1, ..., Z=25, AA=26, etc.)
+        let mut col: usize = 0;
+        for c in col_str.chars() {
+            col = col * 26 + (c as usize - 'A' as usize + 1);
+        }
+        col -= 1; // Convert to 0-based index
+
+        // Convert row number to index (1-based to 0-based)
+        let row: usize = row_str.parse().ok()?;
+        if row == 0 {
+            return None; // Row numbers start at 1
+        }
+        let row = row - 1;
+
+        Some((row, col))
+    }
+
+    pub fn execute_command(&mut self) -> bool {
+        let cmd = self.command_buffer.trim().to_uppercase();
+        
+        // Check if it's a quit command
+        if cmd == "Q" || cmd == "QUIT" {
+            return true; // Signal to quit
+        }
+
+        // Try to parse as cell reference
+        if let Some((row, col)) = Self::parse_cell_reference(&cmd) {
+            if row < self.num_rows && col < self.num_cols {
+                self.cursor_row = row;
+                self.cursor_col = col;
+                self.selection_anchor = None;
+                self.command_message = None;
+                self.exit_command_mode();
+            } else {
+                self.command_message = Some(format!("Cell {} is out of range", cmd));
+            }
+        } else {
+            self.command_message = Some(format!("Unknown command: {}", cmd));
+        }
+
+        false // Don't quit
     }
 
     pub fn enter_find_mode(&mut self) {

@@ -505,7 +505,12 @@ fn render_stats_bar(f: &mut Frame, spreadsheet: &mut Spreadsheet, area: Rect) {
 }
 
 fn render_status_bar(f: &mut Frame, spreadsheet: &Spreadsheet, area: Rect) {
-    let (mode, mode_style) = if spreadsheet.open_mode {
+    let (mode, mode_style) = if spreadsheet.command_mode {
+        (
+            " COMMAND ",
+            Style::default().bg(Color::Rgb(138, 43, 226)).fg(Color::White),
+        )
+    } else if spreadsheet.open_mode {
         (
             " OPEN ",
             Style::default().bg(Color::Rgb(0, 100, 200)).fg(Color::White),
@@ -552,7 +557,9 @@ fn render_status_bar(f: &mut Frame, spreadsheet: &Spreadsheet, area: Rect) {
         )
     };
 
-    let status = if spreadsheet.open_mode {
+    let status = if spreadsheet.command_mode {
+        render_command_status(spreadsheet, mode, mode_style)
+    } else if spreadsheet.open_mode {
         render_open_status(spreadsheet, mode, mode_style)
     } else if spreadsheet.save_mode {
         render_save_status(spreadsheet, mode, mode_style)
@@ -600,6 +607,29 @@ fn render_find_status<'a>(spreadsheet: &Spreadsheet, mode: &'a str, mode_style: 
         Span::styled(" confirm  ", Style::default().fg(Color::DarkGray)),
         Span::styled("Esc", Style::default().fg(Color::Yellow)),
         Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+    ])
+}
+
+fn render_command_status<'a>(spreadsheet: &Spreadsheet, mode: &'a str, mode_style: Style) -> Line<'a> {
+    let msg = spreadsheet.command_message.as_deref().unwrap_or("");
+    Line::from(vec![
+        Span::styled(mode, mode_style),
+        Span::styled("  :", Style::default().fg(Color::White)),
+        Span::styled(
+            format!("{}_", spreadsheet.command_buffer),
+            Style::default().fg(Color::White),
+        ),
+        Span::styled("  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Enter", Style::default().fg(Color::Yellow)),
+        Span::styled(" execute  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Esc", Style::default().fg(Color::Yellow)),
+        Span::styled(" cancel  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("(e.g. A1, B23, q)", Style::default().fg(Color::Cyan)),
+        if !msg.is_empty() {
+            Span::styled(format!("  {}", msg), Style::default().fg(Color::Red))
+        } else {
+            Span::raw("")
+        },
     ])
 }
 
