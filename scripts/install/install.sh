@@ -147,14 +147,18 @@ main() {
     # Download the archive with error checking
     HTTP_CODE=0
     if command_exists curl; then
-        HTTP_CODE=$(curl -L -w "%{http_code}" -o "$TEMP_DIR/$ARCHIVE_NAME" -f "$DOWNLOAD_URL" 2>/dev/null | tail -n1)
+        # Download and capture HTTP code separately
+        HTTP_CODE=$(curl -L -w "%{http_code}" -o "$TEMP_DIR/$ARCHIVE_NAME" -s "$DOWNLOAD_URL" 2>&1 | tail -n1)
         CURL_EXIT=$?
+        
+        # Check if download was successful
         if [ $CURL_EXIT -ne 0 ] || [ "$HTTP_CODE" != "200" ]; then
             echo -e "${RED}Error: Download failed${NC}"
-            if [ "$HTTP_CODE" != "200" ] && [ -n "$HTTP_CODE" ]; then
+            if [ -n "$HTTP_CODE" ] && [ "$HTTP_CODE" != "200" ]; then
                 echo "HTTP status code: $HTTP_CODE"
             fi
             if [ -f "$TEMP_DIR/$ARCHIVE_NAME" ]; then
+                echo ""
                 echo "Downloaded content (first 500 chars):"
                 head -c 500 "$TEMP_DIR/$ARCHIVE_NAME" 2>/dev/null || true
                 echo ""
@@ -166,6 +170,7 @@ main() {
         if ! wget -O "$TEMP_DIR/$ARCHIVE_NAME" "$DOWNLOAD_URL" 2>&1; then
             echo -e "${RED}Error: Download failed${NC}"
             if [ -f "$TEMP_DIR/$ARCHIVE_NAME" ]; then
+                echo ""
                 echo "Downloaded content (first 500 chars):"
                 head -c 500 "$TEMP_DIR/$ARCHIVE_NAME" 2>/dev/null || true
                 echo ""
@@ -180,24 +185,35 @@ main() {
     fi
     
     # Verify the downloaded file is actually a tar.gz archive
-    # Check if it's an HTML error page (common when release doesn't exist)
-    if head -c 100 "$TEMP_DIR/$ARCHIVE_NAME" 2>/dev/null | grep -q "<!DOCTYPE html\|<html\|404\|Not Found"; then
-        echo -e "${RED}Error: Downloaded file appears to be an HTML error page${NC}"
-        echo "This usually means the release doesn't exist yet or the URL is incorrect."
+    # Check gzip magic bytes (1f 8b) at the start of the file
+    FIRST_BYTES=$(head -c 2 "$TEMP_DIR/$ARCHIVE_NAME" 2>/dev/null | od -An -tx1 | tr -d ' \n' || echo "")
+    if [ "$FIRST_BYTES" != "1f8b" ]; then
+        echo -e "${RED}Error: Downloaded file is not a valid gzip archive${NC}"
+        echo "Expected gzip magic bytes (1f 8b), got: $FIRST_BYTES"
         echo ""
-        echo "First few lines of downloaded content:"
-        head -n 10 "$TEMP_DIR/$ARCHIVE_NAME" 2>/dev/null || true
-        echo ""
-        echo "Please check:"
-        echo "  1. That a release with tag 'latest' exists at: https://github.com/only-using-ai/rustxl/releases"
-        echo "  2. That the release includes the file: $ARCHIVE_NAME"
+        
+        # Check if it's an HTML error page
+        if head -c 100 "$TEMP_DIR/$ARCHIVE_NAME" 2>/dev/null | grep -q "<!DOCTYPE html\|<html\|404\|Not Found"; then
+            echo "The downloaded file appears to be an HTML error page."
+            echo "This usually means the release doesn't exist yet or the URL is incorrect."
+            echo ""
+            echo "First few lines of downloaded content:"
+            head -n 10 "$TEMP_DIR/$ARCHIVE_NAME" 2>/dev/null || true
+            echo ""
+            echo "Please check:"
+            echo "  1. That a release with tag 'latest' exists at: https://github.com/only-using-ai/rustxl/releases"
+            echo "  2. That the release includes the file: $ARCHIVE_NAME"
+        else
+            echo "File content (first 200 bytes):"
+            head -c 200 "$TEMP_DIR/$ARCHIVE_NAME" 2>/dev/null | od -c | head -n 5 || true
+        fi
         exit 1
     fi
     
-    # Verify file type if 'file' command is available
+    # Additional verification with 'file' command if available
     if command_exists file; then
         FILE_TYPE=$(file -b "$TEMP_DIR/$ARCHIVE_NAME" 2>/dev/null || echo "unknown")
-        if [[ "$FILE_TYPE" =~ (HTML|text) ]] && [[ ! "$FILE_TYPE" =~ (gzip|tar|archive) ]]; then
+        if [[ "$FILE_TYPE" =~ (HTML|text) ]] && [[ ! "$FILE_TYPE" =~ (gzip|tar|archive|compressed) ]]; then
             echo -e "${RED}Error: Downloaded file appears to be text/HTML, not an archive${NC}"
             echo "File type: $FILE_TYPE"
             echo "First few lines:"
