@@ -91,6 +91,7 @@ jobs:
 
       - name: Determine binary name
         id: binary
+        shell: bash
         run: |
           if [ "${{ matrix.exe_ext }}" = ".exe" ]; then
             echo "name=xl.exe" >> $GITHUB_OUTPUT
@@ -108,11 +109,12 @@ jobs:
 
       - name: Create release archive (Windows)
         if: matrix.os == 'windows-latest'
+        shell: pwsh
         run: |
-          mkdir ${{ matrix.artifact_name }}
-          copy target\${{ matrix.target }}\release\${{ steps.binary.outputs.name }} ${{ matrix.artifact_name }}\
-          powershell Compress-Archive -Path ${{ matrix.artifact_name }} -DestinationPath ${{ matrix.asset_name }} -Force
-          echo "archive_path=${{ matrix.asset_name }}" >> $GITHUB_ENV
+          New-Item -ItemType Directory -Force -Path ${{ matrix.artifact_name }} | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\${{ steps.binary.outputs.name }}" "${{ matrix.artifact_name }}\"
+          Compress-Archive -Path ${{ matrix.artifact_name }} -DestinationPath ${{ matrix.asset_name }} -Force
+          "archive_path=${{ matrix.asset_name }}" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
