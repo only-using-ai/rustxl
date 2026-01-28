@@ -1,1 +1,15 @@
+# Rust build artifacts
 /target
+
+# Node.js dependencies
+node_modules/
+
+# Build folders
+dist/
+build/
+out/
+.remotion/
+
+# macOS system files
+.DS_Store
+**/.DS_Store

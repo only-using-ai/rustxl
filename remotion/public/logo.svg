@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
+  <!-- Stacked spreadsheet cells with depth -->
+  <defs>
+    <linearGradient id="stackGrad1" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#f97316"/>
+      <stop offset="100%" style="stop-color:#ea580c"/>
+    </linearGradient>
+    <linearGradient id="stackGrad2" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#fb923c"/>
+      <stop offset="100%" style="stop-color:#f97316"/>
+    </linearGradient>
+    <linearGradient id="stackGrad3" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#fdba74"/>
+      <stop offset="100%" style="stop-color:#fb923c"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Back layer -->
+  <rect x="50" y="30" width="120" height="100" rx="6" fill="url(#stackGrad3)"/>
+
+  <!-- Middle layer -->
+  <rect x="40" y="45" width="120" height="100" rx="6" fill="url(#stackGrad2)"/>
+
+  <!-- Front layer -->
+  <rect x="30" y="60" width="120" height="100" rx="6" fill="url(#stackGrad1)"/>
+
+  <!-- Grid lines on front -->
+  <line x1="90" y1="60" x2="90" y2="160" stroke="#fff" stroke-width="1" opacity="0.3"/>
+  <line x1="30" y1="110" x2="150" y2="110" stroke="#fff" stroke-width="1" opacity="0.3"/>
+
+  <!-- XL text -->
+  <text x="90" y="125" font-family="system-ui, -apple-system, sans-serif" font-size="44" font-weight="800" fill="#fff" text-anchor="middle">XL</text>
+
+  <!-- Bottom label -->
+  <text x="100" y="185" font-family="system-ui, -apple-system, sans-serif" font-size="14" font-weight="500" fill="#78716c" text-anchor="middle">RUSTXL</text>
+</svg>
