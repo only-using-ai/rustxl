@@ -65,10 +65,10 @@ fn get_platform_asset_name() -> Option<String> {
     let arch = env::consts::ARCH;
 
     match (os, arch) {
-        ("macos", "aarch64") => Some("xl-darwin-arm64.tar.gz".to_string()),
-        ("macos", "x86_64") => Some("xl-darwin-x86_64.tar.gz".to_string()),
+        ("macos", "aarch64") => Some("xl-macos-arm64.tar.gz".to_string()),
+        ("macos", "x86_64") => Some("xl-macos-x86_64.tar.gz".to_string()),
         ("linux", "x86_64") => Some("xl-linux-x86_64.tar.gz".to_string()),
-        ("linux", "aarch64") => Some("xl-linux-arm64.tar.gz".to_string()),
+        ("linux", "aarch64") => Some("xl-linux-aarch64.tar.gz".to_string()),
         _ => None,
     }
 }
@@ -303,8 +303,11 @@ mod tests {
         assert!(is_newer_version("0.1.0", "0.2.0"));
         assert!(is_newer_version("0.1.0", "1.0.0"));
         assert!(is_newer_version("v0.1.0", "v0.1.1"));
+        assert!(is_newer_version("0.1.2", "0.1.5"));
+        assert!(is_newer_version("0.1.2", "v0.1.5"));
         assert!(!is_newer_version("0.1.1", "0.1.0"));
         assert!(!is_newer_version("0.1.0", "0.1.0"));
+        assert!(!is_newer_version("0.1.5", "0.1.2"));
     }
 
     #[test]

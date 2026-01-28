@@ -264,7 +264,59 @@ code, pre, kbd {
     font-size: 0.8125rem;
     font-weight: 500;
     color: var(--color-primary);
+    margin-bottom: var(--space-3);
+}
+
+.hero-version {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+    background: var(--color-accent-subtle);
+    border: 1px solid rgba(34, 211, 238, 0.2);
+    border-radius: 9999px;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: var(--color-accent);
     margin-bottom: var(--space-6);
+}
+
+.hero-formula-highlight {
+    margin: var(--space-8) auto var(--space-10);
+    padding: var(--space-6);
+    max-width: 600px;
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-xl);
+    box-shadow: var(--shadow-lg);
+}
+
+.formula-highlight-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-accent);
+    margin-bottom: var(--space-3);
+}
+
+.formula-highlight-code {
+    display: block;
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--color-accent);
+    margin-bottom: var(--space-3);
+    padding: var(--space-3);
+    background: var(--color-bg-subtle);
+    border-radius: var(--radius-md);
+    border: 1px solid rgba(34, 211, 238, 0.2);
+}
+
+.formula-highlight-desc {
+    font-size: 0.875rem;
+    color: var(--color-text-secondary);
+    margin: 0;
+    line-height: 1.6;
 }
 
 .hero h1 {
@@ -725,6 +777,16 @@ section {
 .formula-item span {
     font-size: 0.8125rem;
     color: var(--color-text-muted);
+}
+
+.formula-item.formula-featured {
+    background: var(--color-accent-subtle);
+    border-color: rgba(34, 211, 238, 0.3);
+}
+
+.formula-item.formula-featured code {
+    color: var(--color-accent);
+    font-weight: 600;
 }
 
 .formula-note {

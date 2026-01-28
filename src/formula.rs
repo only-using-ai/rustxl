@@ -134,6 +134,96 @@ impl Spreadsheet {
             return self.evaluate_vlookup(inner, row, col);
         }
 
+        // Handle AND function (case-insensitive)
+        if expr_upper.starts_with("AND(") && expr_upper.ends_with(')') {
+            let inner = &expr[4..expr.len() - 1];
+            return self.evaluate_and(inner, row, col);
+        }
+
+        // Handle OR function (case-insensitive)
+        if expr_upper.starts_with("OR(") && expr_upper.ends_with(')') {
+            let inner = &expr[3..expr.len() - 1];
+            return self.evaluate_or(inner, row, col);
+        }
+
+        // Handle ABS function (case-insensitive)
+        if expr_upper.starts_with("ABS(") && expr_upper.ends_with(')') {
+            let inner = &expr[4..expr.len() - 1];
+            return self.evaluate_abs(inner, row, col);
+        }
+
+        // Handle TRIM function (case-insensitive)
+        if expr_upper.starts_with("TRIM(") && expr_upper.ends_with(')') {
+            let inner = &expr[5..expr.len() - 1];
+            return self.evaluate_trim(inner, row, col);
+        }
+
+        // Handle UPPER function (case-insensitive)
+        if expr_upper.starts_with("UPPER(") && expr_upper.ends_with(')') {
+            let inner = &expr[6..expr.len() - 1];
+            return self.evaluate_upper(inner, row, col);
+        }
+
+        // Handle NOT function (case-insensitive)
+        if expr_upper.starts_with("NOT(") && expr_upper.ends_with(')') {
+            let inner = &expr[4..expr.len() - 1];
+            return self.evaluate_not(inner, row, col);
+        }
+
+        // Handle LOWER function (case-insensitive)
+        if expr_upper.starts_with("LOWER(") && expr_upper.ends_with(')') {
+            let inner = &expr[6..expr.len() - 1];
+            return self.evaluate_lower(inner, row, col);
+        }
+
+        // Handle MOD function (case-insensitive)
+        if expr_upper.starts_with("MOD(") && expr_upper.ends_with(')') {
+            let inner = &expr[4..expr.len() - 1];
+            return self.evaluate_mod(inner, row, col);
+        }
+
+        // Handle SQRT function (case-insensitive)
+        if expr_upper.starts_with("SQRT(") && expr_upper.ends_with(')') {
+            let inner = &expr[5..expr.len() - 1];
+            return self.evaluate_sqrt(inner, row, col);
+        }
+
+        // Handle POWER function (case-insensitive)
+        if expr_upper.starts_with("POWER(") && expr_upper.ends_with(')') {
+            let inner = &expr[6..expr.len() - 1];
+            return self.evaluate_power(inner, row, col);
+        }
+
+        // Handle IFERROR function (case-insensitive)
+        if expr_upper.starts_with("IFERROR(") && expr_upper.ends_with(')') {
+            let inner = &expr[8..expr.len() - 1];
+            return self.evaluate_iferror(inner, row, col);
+        }
+
+        // Handle INT function (case-insensitive)
+        if expr_upper.starts_with("INT(") && expr_upper.ends_with(')') {
+            let inner = &expr[4..expr.len() - 1];
+            return self.evaluate_int(inner, row, col);
+        }
+
+        // Handle PROPER function (case-insensitive)
+        if expr_upper.starts_with("PROPER(") && expr_upper.ends_with(')') {
+            let inner = &expr[7..expr.len() - 1];
+            return self.evaluate_proper(inner, row, col);
+        }
+
+        // Handle PRODUCT function (case-insensitive)
+        if expr_upper.starts_with("PRODUCT(") && expr_upper.ends_with(')') {
+            let inner = &expr[8..expr.len() - 1];
+            return self.evaluate_product(inner);
+        }
+
+        // Handle MEDIAN function (case-insensitive)
+        if expr_upper.starts_with("MEDIAN(") && expr_upper.ends_with(')') {
+            let inner = &expr[7..expr.len() - 1];
+            return self.evaluate_median(inner);
+        }
+
         // Handle simple arithmetic
         if let Ok(val) = self.evaluate_arithmetic(expr) {
             return format!("{}", val);
@@ -1321,6 +1411,501 @@ impl Spreadsheet {
             }
         }
     }
+
+    pub fn evaluate_and(&mut self, args: &str, current_row: usize, current_col: usize) -> String {
+        let parts = self.split_function_args(args);
+        if parts.is_empty() {
+            return "#ERROR".to_string();
+        }
+
+        for part in parts {
+            let part = part.trim();
+            
+            // Check if it's a boolean literal (TRUE/FALSE without quotes)
+            let part_upper = part.to_uppercase();
+            if part_upper == "TRUE" {
+                continue; // TRUE, continue to next argument
+            }
+            if part_upper == "FALSE" {
+                return "FALSE".to_string();
+            }
+            
+            // Try to evaluate as a condition (e.g., "5>3")
+            if let Some(cond_result) = self.evaluate_condition(part, current_row, current_col) {
+                if !cond_result {
+                    return "FALSE".to_string();
+                }
+                continue;
+            }
+            
+            // Try to evaluate as a number
+            let value = self.evaluate_arg_as_number(part, current_row, current_col);
+            let is_true = if let Some(num) = value {
+                num.abs() > f64::EPSILON
+            } else {
+                // Try to evaluate as text/boolean
+                let text = self.evaluate_arg(part, current_row, current_col);
+                let text_upper = text.to_uppercase();
+                text_upper == "TRUE" || text_upper == "1"
+            };
+
+            if !is_true {
+                return "FALSE".to_string();
+            }
+        }
+
+        "TRUE".to_string()
+    }
+
+    pub fn evaluate_or(&mut self, args: &str, current_row: usize, current_col: usize) -> String {
+        let parts = self.split_function_args(args);
+        if parts.is_empty() {
+            return "#ERROR".to_string();
+        }
+
+        for part in parts {
+            let part = part.trim();
+            
+            // Check if it's a boolean literal (TRUE/FALSE without quotes)
+            let part_upper = part.to_uppercase();
+            if part_upper == "TRUE" {
+                return "TRUE".to_string();
+            }
+            if part_upper == "FALSE" {
+                continue; // FALSE, continue to next argument
+            }
+            
+            // Try to evaluate as a condition (e.g., "5>3")
+            if let Some(cond_result) = self.evaluate_condition(part, current_row, current_col) {
+                if cond_result {
+                    return "TRUE".to_string();
+                }
+                continue;
+            }
+            
+            // Try to evaluate as a number
+            let value = self.evaluate_arg_as_number(part, current_row, current_col);
+            let is_true = if let Some(num) = value {
+                num.abs() > f64::EPSILON
+            } else {
+                // Try to evaluate as text/boolean
+                let text = self.evaluate_arg(part, current_row, current_col);
+                let text_upper = text.to_uppercase();
+                text_upper == "TRUE" || text_upper == "1"
+            };
+
+            if is_true {
+                return "TRUE".to_string();
+            }
+        }
+
+        "FALSE".to_string()
+    }
+
+    pub fn evaluate_abs(&mut self, args: &str, current_row: usize, current_col: usize) -> String {
+        let parts = self.split_function_args(args);
+        if parts.len() != 1 {
+            return "#ERROR".to_string();
+        }
+
+        let number = match self.evaluate_arg_as_number(parts[0].trim(), current_row, current_col) {
+            Some(n) => n,
+            None => return "#ERROR".to_string(),
+        };
+
+        let abs_value = number.abs();
+        if abs_value.fract() == 0.0 {
+            format!("{:.0}", abs_value)
+        } else {
+            format!("{}", abs_value)
+        }
+    }
+
+    pub fn evaluate_trim(&mut self, args: &str, current_row: usize, current_col: usize) -> String {
+        let parts = self.split_function_args(args);
+        if parts.len() != 1 {
+            return "#ERROR".to_string();
+        }
+
+        let text = self.evaluate_arg(parts[0].trim(), current_row, current_col);
+
+        // Remove quotes if present
+        let text = if text.len() >= 2 {
+            let first_char = text.chars().next().unwrap();
+            let last_char = text.chars().last().unwrap();
+            if (first_char == '"' && last_char == '"') || (first_char == '\'' && last_char == '\'') {
+                text[1..text.len() - 1].to_string()
+            } else {
+                text
+            }
+        } else {
+            text
+        };
+
+        // TRIM removes leading and trailing spaces, and reduces multiple spaces to single spaces
+        let trimmed: String = text
+            .split_whitespace()
+            .collect::<Vec<&str>>()
+            .join(" ");
+
+        trimmed
+    }
+
+    pub fn evaluate_upper(&mut self, args: &str, current_row: usize, current_col: usize) -> String {
+        let parts = self.split_function_args(args);
+        if parts.len() != 1 {
+            return "#ERROR".to_string();
+        }
+
+        let text = self.evaluate_arg(parts[0].trim(), current_row, current_col);
+
+        // Remove quotes if present
+        let text = if text.len() >= 2 {
+            let first_char = text.chars().next().unwrap();
+            let last_char = text.chars().last().unwrap();
+            if (first_char == '"' && last_char == '"') || (first_char == '\'' && last_char == '\'') {
+                text[1..text.len() - 1].to_string()
+            } else {
+                text
+            }
+        } else {
+            text
+        };
+
+        text.to_uppercase()
+    }
+
+    pub fn evaluate_not(&mut self, args: &str, current_row: usize, current_col: usize) -> String {
+        let parts = self.split_function_args(args);
+        if parts.len() != 1 {
+            return "#ERROR".to_string();
+        }
+
+        let arg = parts[0].trim();
+        
+        // Check if it's a boolean literal (TRUE/FALSE without quotes)
+        let arg_upper = arg.to_uppercase();
+        if arg_upper == "TRUE" {
+            return "FALSE".to_string();
+        }
+        if arg_upper == "FALSE" {
+            return "TRUE".to_string();
+        }
+        
+        // Try to evaluate as a condition (e.g., "5>3")
+        if let Some(cond_result) = self.evaluate_condition(arg, current_row, current_col) {
+            return if cond_result { "FALSE".to_string() } else { "TRUE".to_string() };
+        }
+        
+        // Try to evaluate as a number
+        let value = self.evaluate_arg_as_number(arg, current_row, current_col);
+        let is_true = if let Some(num) = value {
+            num.abs() > f64::EPSILON
+        } else {
+            // Try to evaluate as text/boolean
+            let text = self.evaluate_arg(arg, current_row, current_col);
+            let text_upper = text.to_uppercase();
+            text_upper == "TRUE" || text_upper == "1"
+        };
+
+        if is_true {
+            "FALSE".to_string()
+        } else {
+            "TRUE".to_string()
+        }
+    }
+
+    pub fn evaluate_lower(&mut self, args: &str, current_row: usize, current_col: usize) -> String {
+        let parts = self.split_function_args(args);
+        if parts.len() != 1 {
+            return "#ERROR".to_string();
+        }
+
+        let text = self.evaluate_arg(parts[0].trim(), current_row, current_col);
+
+        // Remove quotes if present
+        let text = if text.len() >= 2 {
+            let first_char = text.chars().next().unwrap();
+            let last_char = text.chars().last().unwrap();
+            if (first_char == '"' && last_char == '"') || (first_char == '\'' && last_char == '\'') {
+                text[1..text.len() - 1].to_string()
+            } else {
+                text
+            }
+        } else {
+            text
+        };
+
+        text.to_lowercase()
+    }
+
+    pub fn evaluate_mod(&mut self, args: &str, current_row: usize, current_col: usize) -> String {
+        let parts = self.split_function_args(args);
+        if parts.len() != 2 {
+            return "#ERROR".to_string();
+        }
+
+        let number = match self.evaluate_arg_as_number(parts[0].trim(), current_row, current_col) {
+            Some(n) => n,
+            None => return "#ERROR".to_string(),
+        };
+        let divisor = match self.evaluate_arg_as_number(parts[1].trim(), current_row, current_col) {
+            Some(n) => n,
+            None => return "#ERROR".to_string(),
+        };
+
+        if divisor == 0.0 {
+            return "#DIV/0!".to_string();
+        }
+
+        let result = number % divisor;
+        if result.fract() == 0.0 {
+            format!("{:.0}", result)
+        } else {
+            format!("{}", result)
+        }
+    }
+
+    pub fn evaluate_sqrt(&mut self, args: &str, current_row: usize, current_col: usize) -> String {
+        let parts = self.split_function_args(args);
+        if parts.len() != 1 {
+            return "#ERROR".to_string();
+        }
+
+        let number = match self.evaluate_arg_as_number(parts[0].trim(), current_row, current_col) {
+            Some(n) => n,
+            None => return "#ERROR".to_string(),
+        };
+
+        if number < 0.0 {
+            return "#NUM!".to_string();
+        }
+
+        let result = number.sqrt();
+        if result.fract() == 0.0 {
+            format!("{:.0}", result)
+        } else {
+            format!("{}", result)
+        }
+    }
+
+    pub fn evaluate_power(&mut self, args: &str, current_row: usize, current_col: usize) -> String {
+        let parts = self.split_function_args(args);
+        if parts.len() != 2 {
+            return "#ERROR".to_string();
+        }
+
+        let base = match self.evaluate_arg_as_number(parts[0].trim(), current_row, current_col) {
+            Some(n) => n,
+            None => return "#ERROR".to_string(),
+        };
+        let exponent = match self.evaluate_arg_as_number(parts[1].trim(), current_row, current_col) {
+            Some(n) => n,
+            None => return "#ERROR".to_string(),
+        };
+
+        let result = base.powf(exponent);
+        
+        // Check for invalid results (NaN or Infinity)
+        if result.is_nan() || result.is_infinite() {
+            return "#NUM!".to_string();
+        }
+
+        if result.fract() == 0.0 {
+            format!("{:.0}", result)
+        } else {
+            format!("{}", result)
+        }
+    }
+
+    pub fn evaluate_iferror(&mut self, args: &str, current_row: usize, current_col: usize) -> String {
+        let parts = self.split_function_args(args);
+        if parts.len() != 2 {
+            return "#ERROR".to_string();
+        }
+
+        let value = parts[0].trim();
+        let value_if_error = parts[1].trim();
+
+        // Try to evaluate the first argument as a formula if it contains operators or functions
+        let result = if value.contains('+') || value.contains('-') || value.contains('*') || value.contains('/') || value.contains('(') {
+            // It's an arithmetic expression or function, evaluate as formula
+            self.evaluate_formula(&format!("={}", value), current_row, current_col)
+        } else {
+            // Try as regular argument
+            self.evaluate_arg(value, current_row, current_col)
+        };
+        
+        // Check if result is an error (starts with #) or infinity/NaN
+        if result.starts_with("#") || result == "inf" || result == "-inf" || result == "nan" || result == "NaN" {
+            // It's an error, return the value_if_error
+            self.evaluate_arg(value_if_error, current_row, current_col)
+        } else {
+            // Not an error, return the result
+            result
+        }
+    }
+
+    pub fn evaluate_int(&mut self, args: &str, current_row: usize, current_col: usize) -> String {
+        let parts = self.split_function_args(args);
+        if parts.len() != 1 {
+            return "#ERROR".to_string();
+        }
+
+        let number = match self.evaluate_arg_as_number(parts[0].trim(), current_row, current_col) {
+            Some(n) => n,
+            None => return "#ERROR".to_string(),
+        };
+
+        // INT rounds down toward negative infinity (floor for positive, but different for negative)
+        let result = if number >= 0.0 {
+            number.floor()
+        } else {
+            number.floor() // floor() already rounds down for negative numbers
+        };
+
+        format!("{:.0}", result)
+    }
+
+    pub fn evaluate_proper(&mut self, args: &str, current_row: usize, current_col: usize) -> String {
+        let parts = self.split_function_args(args);
+        if parts.len() != 1 {
+            return "#ERROR".to_string();
+        }
+
+        let text = self.evaluate_arg(parts[0].trim(), current_row, current_col);
+
+        // Remove quotes if present
+        let text = if text.len() >= 2 {
+            let first_char = text.chars().next().unwrap();
+            let last_char = text.chars().last().unwrap();
+            if (first_char == '"' && last_char == '"') || (first_char == '\'' && last_char == '\'') {
+                text[1..text.len() - 1].to_string()
+            } else {
+                text
+            }
+        } else {
+            text
+        };
+
+        // PROPER converts to title case: first letter of each word uppercase, rest lowercase
+        let mut result = String::new();
+        let mut capitalize_next = true;
+        
+        for c in text.chars() {
+            if c.is_whitespace() {
+                result.push(c);
+                capitalize_next = true;
+            } else if capitalize_next {
+                result.push(c.to_uppercase().next().unwrap());
+                capitalize_next = false;
+            } else {
+                result.push(c.to_lowercase().next().unwrap());
+            }
+        }
+        
+        result
+    }
+
+    pub fn evaluate_product(&mut self, args: &str) -> String {
+        let mut product = 1.0;
+        let mut has_values = false;
+
+        for arg in args.split(',') {
+            let arg = arg.trim();
+
+            if let Some((start, end)) = arg.split_once(':') {
+                if let (Some((sr, sc)), Some((er, ec))) =
+                    (self.parse_cell_ref(start), self.parse_cell_ref(end))
+                {
+                    let min_row = sr.min(er);
+                    let max_row = sr.max(er);
+                    let min_col = sc.min(ec);
+                    let max_col = sc.max(ec);
+                    for row in min_row..=max_row {
+                        for col in min_col..=max_col {
+                            if let Some(val) = self.get_cell_value_at(row, col) {
+                                product *= val;
+                                has_values = true;
+                            }
+                        }
+                    }
+                } else {
+                    return "#ERROR".to_string();
+                }
+            } else if let Some(val) = self.get_cell_value(arg) {
+                product *= val;
+                has_values = true;
+            } else if let Ok(val) = arg.parse::<f64>() {
+                product *= val;
+                has_values = true;
+            }
+        }
+
+        if !has_values {
+            return "#ERROR".to_string();
+        }
+
+        if product.fract() == 0.0 {
+            format!("{:.0}", product)
+        } else {
+            format!("{}", product)
+        }
+    }
+
+    pub fn evaluate_median(&mut self, args: &str) -> String {
+        let mut values = Vec::new();
+
+        for arg in args.split(',') {
+            let arg = arg.trim();
+
+            if let Some((start, end)) = arg.split_once(':') {
+                if let (Some((sr, sc)), Some((er, ec))) =
+                    (self.parse_cell_ref(start), self.parse_cell_ref(end))
+                {
+                    let min_row = sr.min(er);
+                    let max_row = sr.max(er);
+                    let min_col = sc.min(ec);
+                    let max_col = sc.max(ec);
+                    for row in min_row..=max_row {
+                        for col in min_col..=max_col {
+                            if let Some(val) = self.get_cell_value_at(row, col) {
+                                values.push(val);
+                            }
+                        }
+                    }
+                } else {
+                    return "#ERROR".to_string();
+                }
+            } else if let Some(val) = self.get_cell_value(arg) {
+                values.push(val);
+            } else if let Ok(val) = arg.parse::<f64>() {
+                values.push(val);
+            }
+        }
+
+        if values.is_empty() {
+            return "#ERROR".to_string();
+        }
+
+        // Sort values
+        values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        
+        let len = values.len();
+        let median = if len % 2 == 0 {
+            // Even number of values: average of two middle values
+            (values[len / 2 - 1] + values[len / 2]) / 2.0
+        } else {
+            // Odd number of values: middle value
+            values[len / 2]
+        };
+
+        if median.fract() == 0.0 {
+            format!("{:.0}", median)
+        } else {
+            format!("{}", median)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1709,5 +2294,293 @@ mod tests {
         sheet.set_cell(1, 0, "Banana".to_string());
         sheet.set_cell(1, 1, "Yellow".to_string());
         assert_eq!(sheet.evaluate_formula("=VLOOKUP(\"Banana\",A1:B2,2)", 0, 0), "Yellow");
+    }
+
+    #[test]
+    fn test_evaluate_and() {
+        let mut sheet = Spreadsheet::new();
+        assert_eq!(sheet.evaluate_formula("=AND(TRUE,TRUE)", 0, 0), "TRUE");
+        assert_eq!(sheet.evaluate_formula("=AND(TRUE,FALSE)", 0, 0), "FALSE");
+        assert_eq!(sheet.evaluate_formula("=AND(1,1)", 0, 0), "TRUE");
+        assert_eq!(sheet.evaluate_formula("=AND(1,0)", 0, 0), "FALSE");
+        assert_eq!(sheet.evaluate_formula("=AND(5>3,10>5)", 0, 0), "TRUE");
+        assert_eq!(sheet.evaluate_formula("=AND(5>3,2>5)", 0, 0), "FALSE");
+        assert_eq!(sheet.evaluate_formula("=and(TRUE,TRUE)", 0, 0), "TRUE"); // case insensitive
+        
+        sheet.set_cell(0, 0, "1".to_string());
+        sheet.set_cell(0, 1, "1".to_string());
+        assert_eq!(sheet.evaluate_formula("=AND(A1,B1)", 0, 0), "TRUE");
+    }
+
+    #[test]
+    fn test_evaluate_or() {
+        let mut sheet = Spreadsheet::new();
+        assert_eq!(sheet.evaluate_formula("=OR(TRUE,FALSE)", 0, 0), "TRUE");
+        assert_eq!(sheet.evaluate_formula("=OR(FALSE,FALSE)", 0, 0), "FALSE");
+        assert_eq!(sheet.evaluate_formula("=OR(1,0)", 0, 0), "TRUE");
+        assert_eq!(sheet.evaluate_formula("=OR(0,0)", 0, 0), "FALSE");
+        assert_eq!(sheet.evaluate_formula("=OR(5>3,2>5)", 0, 0), "TRUE");
+        assert_eq!(sheet.evaluate_formula("=OR(2>5,3>5)", 0, 0), "FALSE");
+        assert_eq!(sheet.evaluate_formula("=or(TRUE,FALSE)", 0, 0), "TRUE"); // case insensitive
+        
+        sheet.set_cell(0, 0, "0".to_string());
+        sheet.set_cell(0, 1, "1".to_string());
+        assert_eq!(sheet.evaluate_formula("=OR(A1,B1)", 0, 0), "TRUE");
+    }
+
+    #[test]
+    fn test_evaluate_abs() {
+        let mut sheet = Spreadsheet::new();
+        assert_eq!(sheet.evaluate_formula("=ABS(5)", 0, 0), "5");
+        assert_eq!(sheet.evaluate_formula("=ABS(-5)", 0, 0), "5");
+        assert_eq!(sheet.evaluate_formula("=ABS(0)", 0, 0), "0");
+        assert_eq!(sheet.evaluate_formula("=ABS(-3.14)", 0, 0), "3.14");
+        assert_eq!(sheet.evaluate_formula("=abs(-10)", 0, 0), "10"); // case insensitive
+        
+        sheet.set_cell(0, 0, "-15".to_string());
+        assert_eq!(sheet.evaluate_formula("=ABS(A1)", 0, 0), "15");
+    }
+
+    #[test]
+    fn test_evaluate_trim() {
+        let mut sheet = Spreadsheet::new();
+        assert_eq!(sheet.evaluate_formula("=TRIM(\"  hello  \")", 0, 0), "hello");
+        assert_eq!(sheet.evaluate_formula("=TRIM(\"  hello  world  \")", 0, 0), "hello world");
+        assert_eq!(sheet.evaluate_formula("=TRIM(\"hello\")", 0, 0), "hello");
+        assert_eq!(sheet.evaluate_formula("=trim(\"  test  \")", 0, 0), "test"); // case insensitive
+        
+        sheet.set_cell(0, 0, "  spaced  text  ".to_string());
+        assert_eq!(sheet.evaluate_formula("=TRIM(A1)", 0, 0), "spaced text");
+    }
+
+    #[test]
+    fn test_evaluate_upper() {
+        let mut sheet = Spreadsheet::new();
+        assert_eq!(sheet.evaluate_formula("=UPPER(\"hello\")", 0, 0), "HELLO");
+        assert_eq!(sheet.evaluate_formula("=UPPER(\"Hello World\")", 0, 0), "HELLO WORLD");
+        assert_eq!(sheet.evaluate_formula("=UPPER(\"HELLO\")", 0, 0), "HELLO");
+        assert_eq!(sheet.evaluate_formula("=upper(\"test\")", 0, 0), "TEST"); // case insensitive
+        
+        sheet.set_cell(0, 0, "lowercase text".to_string());
+        assert_eq!(sheet.evaluate_formula("=UPPER(A1)", 0, 0), "LOWERCASE TEXT");
+    }
+
+    #[test]
+    fn test_evaluate_not() {
+        let mut sheet = Spreadsheet::new();
+        assert_eq!(sheet.evaluate_formula("=NOT(TRUE)", 0, 0), "FALSE");
+        assert_eq!(sheet.evaluate_formula("=NOT(FALSE)", 0, 0), "TRUE");
+        assert_eq!(sheet.evaluate_formula("=NOT(1)", 0, 0), "FALSE");
+        assert_eq!(sheet.evaluate_formula("=NOT(0)", 0, 0), "TRUE");
+        assert_eq!(sheet.evaluate_formula("=NOT(5>3)", 0, 0), "FALSE");
+        assert_eq!(sheet.evaluate_formula("=NOT(2>5)", 0, 0), "TRUE");
+        assert_eq!(sheet.evaluate_formula("=not(TRUE)", 0, 0), "FALSE"); // case insensitive
+        
+        sheet.set_cell(0, 0, "1".to_string());
+        assert_eq!(sheet.evaluate_formula("=NOT(A1)", 0, 0), "FALSE");
+        sheet.set_cell(0, 0, "0".to_string());
+        assert_eq!(sheet.evaluate_formula("=NOT(A1)", 0, 0), "TRUE");
+    }
+
+    #[test]
+    fn test_evaluate_lower() {
+        let mut sheet = Spreadsheet::new();
+        assert_eq!(sheet.evaluate_formula("=LOWER(\"HELLO\")", 0, 0), "hello");
+        assert_eq!(sheet.evaluate_formula("=LOWER(\"Hello World\")", 0, 0), "hello world");
+        assert_eq!(sheet.evaluate_formula("=LOWER(\"hello\")", 0, 0), "hello");
+        assert_eq!(sheet.evaluate_formula("=lower(\"TEST\")", 0, 0), "test"); // case insensitive
+        
+        sheet.set_cell(0, 0, "UPPERCASE TEXT".to_string());
+        assert_eq!(sheet.evaluate_formula("=LOWER(A1)", 0, 0), "uppercase text");
+    }
+
+    #[test]
+    fn test_evaluate_mod() {
+        let mut sheet = Spreadsheet::new();
+        assert_eq!(sheet.evaluate_formula("=MOD(10,3)", 0, 0), "1");
+        assert_eq!(sheet.evaluate_formula("=MOD(10,5)", 0, 0), "0");
+        assert_eq!(sheet.evaluate_formula("=MOD(15,4)", 0, 0), "3");
+        assert_eq!(sheet.evaluate_formula("=MOD(-10,3)", 0, 0), "-1");
+        assert_eq!(sheet.evaluate_formula("=MOD(10.5,3)", 0, 0), "1.5");
+        assert_eq!(sheet.evaluate_formula("=mod(10,3)", 0, 0), "1"); // case insensitive
+        
+        sheet.set_cell(0, 0, "10".to_string());
+        sheet.set_cell(0, 1, "3".to_string());
+        assert_eq!(sheet.evaluate_formula("=MOD(A1,B1)", 0, 0), "1");
+        
+        // Test division by zero
+        assert_eq!(sheet.evaluate_formula("=MOD(10,0)", 0, 0), "#DIV/0!");
+    }
+
+    #[test]
+    fn test_evaluate_sqrt() {
+        let mut sheet = Spreadsheet::new();
+        assert_eq!(sheet.evaluate_formula("=SQRT(4)", 0, 0), "2");
+        assert_eq!(sheet.evaluate_formula("=SQRT(9)", 0, 0), "3");
+        assert_eq!(sheet.evaluate_formula("=SQRT(16)", 0, 0), "4");
+        assert_eq!(sheet.evaluate_formula("=SQRT(0)", 0, 0), "0");
+        assert_eq!(sheet.evaluate_formula("=SQRT(2)", 0, 0), "1.4142135623730951");
+        assert_eq!(sheet.evaluate_formula("=sqrt(25)", 0, 0), "5"); // case insensitive
+        
+        sheet.set_cell(0, 0, "16".to_string());
+        assert_eq!(sheet.evaluate_formula("=SQRT(A1)", 0, 0), "4");
+        
+        // Test negative number
+        assert_eq!(sheet.evaluate_formula("=SQRT(-1)", 0, 0), "#NUM!");
+    }
+
+    #[test]
+    fn test_evaluate_power() {
+        let mut sheet = Spreadsheet::new();
+        assert_eq!(sheet.evaluate_formula("=POWER(2,3)", 0, 0), "8");
+        assert_eq!(sheet.evaluate_formula("=POWER(5,2)", 0, 0), "25");
+        assert_eq!(sheet.evaluate_formula("=POWER(10,0)", 0, 0), "1");
+        assert_eq!(sheet.evaluate_formula("=POWER(2,0.5)", 0, 0), "1.4142135623730951");
+        assert_eq!(sheet.evaluate_formula("=POWER(3,4)", 0, 0), "81");
+        assert_eq!(sheet.evaluate_formula("=power(2,3)", 0, 0), "8"); // case insensitive
+        
+        sheet.set_cell(0, 0, "2".to_string());
+        sheet.set_cell(0, 1, "4".to_string());
+        assert_eq!(sheet.evaluate_formula("=POWER(A1,B1)", 0, 0), "16");
+        
+        // Test with negative exponent
+        assert_eq!(sheet.evaluate_formula("=POWER(2,-2)", 0, 0), "0.25");
+        
+        // Test with zero base and negative exponent (should produce #NUM!)
+        let result = sheet.evaluate_formula("=POWER(0,-1)", 0, 0);
+        assert!(result == "#NUM!" || result == "inf"); // Depending on implementation
+    }
+
+    #[test]
+    fn test_evaluate_iferror() {
+        let mut sheet = Spreadsheet::new();
+        // Test with no error
+        assert_eq!(sheet.evaluate_formula("=IFERROR(5+3,\"error\")", 0, 0), "8");
+        assert_eq!(sheet.evaluate_formula("=IFERROR(10/2,\"error\")", 0, 0), "5");
+        
+        // Test with division by zero error
+        assert_eq!(sheet.evaluate_formula("=IFERROR(10/0,\"error\")", 0, 0), "error");
+        assert_eq!(sheet.evaluate_formula("=IFERROR(10/0,\"Division by zero\")", 0, 0), "Division by zero");
+        
+        // Test with #ERROR
+        assert_eq!(sheet.evaluate_formula("=IFERROR(#ERROR,\"fallback\")", 0, 0), "fallback");
+        
+        // Test with cell reference that has error
+        sheet.set_cell(0, 0, "=10/0".to_string());
+        assert_eq!(sheet.evaluate_formula("=IFERROR(A1,\"error\")", 0, 1), "error");
+        
+        // Test case insensitive
+        assert_eq!(sheet.evaluate_formula("=iferror(5+3,\"error\")", 0, 0), "8");
+        
+        // Test with nested formula that errors
+        assert_eq!(sheet.evaluate_formula("=IFERROR(SQRT(-1),\"invalid\")", 0, 0), "invalid");
+    }
+
+    #[test]
+    fn test_evaluate_int() {
+        let mut sheet = Spreadsheet::new();
+        assert_eq!(sheet.evaluate_formula("=INT(3.7)", 0, 0), "3");
+        assert_eq!(sheet.evaluate_formula("=INT(3.2)", 0, 0), "3");
+        assert_eq!(sheet.evaluate_formula("=INT(-3.7)", 0, 0), "-4");
+        assert_eq!(sheet.evaluate_formula("=INT(-3.2)", 0, 0), "-4");
+        assert_eq!(sheet.evaluate_formula("=INT(5)", 0, 0), "5");
+        assert_eq!(sheet.evaluate_formula("=INT(0)", 0, 0), "0");
+        assert_eq!(sheet.evaluate_formula("=int(3.7)", 0, 0), "3"); // case insensitive
+        
+        sheet.set_cell(0, 0, "7.9".to_string());
+        assert_eq!(sheet.evaluate_formula("=INT(A1)", 0, 0), "7");
+        
+        sheet.set_cell(0, 0, "-7.9".to_string());
+        assert_eq!(sheet.evaluate_formula("=INT(A1)", 0, 0), "-8");
+    }
+
+    #[test]
+    fn test_evaluate_proper() {
+        let mut sheet = Spreadsheet::new();
+        assert_eq!(sheet.evaluate_formula("=PROPER(\"hello world\")", 0, 0), "Hello World");
+        assert_eq!(sheet.evaluate_formula("=PROPER(\"HELLO WORLD\")", 0, 0), "Hello World");
+        assert_eq!(sheet.evaluate_formula("=PROPER(\"hELLo WoRLd\")", 0, 0), "Hello World");
+        assert_eq!(sheet.evaluate_formula("=PROPER(\"hello\")", 0, 0), "Hello");
+        assert_eq!(sheet.evaluate_formula("=PROPER(\"a b c\")", 0, 0), "A B C");
+        assert_eq!(sheet.evaluate_formula("=proper(\"test\")", 0, 0), "Test"); // case insensitive
+        
+        sheet.set_cell(0, 0, "john smith".to_string());
+        assert_eq!(sheet.evaluate_formula("=PROPER(A1)", 0, 0), "John Smith");
+        
+        // Test with multiple spaces
+        assert_eq!(sheet.evaluate_formula("=PROPER(\"hello  world\")", 0, 0), "Hello  World");
+    }
+
+    #[test]
+    fn test_evaluate_product() {
+        let mut sheet = Spreadsheet::new();
+        assert_eq!(sheet.evaluate_formula("=PRODUCT(2,3,4)", 0, 0), "24");
+        assert_eq!(sheet.evaluate_formula("=PRODUCT(5,2)", 0, 0), "10");
+        assert_eq!(sheet.evaluate_formula("=PRODUCT(10)", 0, 0), "10");
+        assert_eq!(sheet.evaluate_formula("=PRODUCT(2.5,4)", 0, 0), "10");
+        assert_eq!(sheet.evaluate_formula("=PRODUCT(-2,3)", 0, 0), "-6");
+        assert_eq!(sheet.evaluate_formula("=product(2,3)", 0, 0), "6"); // case insensitive
+        
+        sheet.set_cell(0, 0, "2".to_string());
+        sheet.set_cell(0, 1, "3".to_string());
+        sheet.set_cell(0, 2, "4".to_string());
+        assert_eq!(sheet.evaluate_formula("=PRODUCT(A1:C1)", 0, 0), "24");
+        assert_eq!(sheet.evaluate_formula("=PRODUCT(A1,B1,C1)", 0, 0), "24");
+        
+        // Test with range
+        sheet.set_cell(0, 0, "1".to_string());
+        sheet.set_cell(1, 0, "2".to_string());
+        sheet.set_cell(2, 0, "3".to_string());
+        assert_eq!(sheet.evaluate_formula("=PRODUCT(A1:A3)", 0, 0), "6");
+        
+        // Test with zero
+        assert_eq!(sheet.evaluate_formula("=PRODUCT(5,0,10)", 0, 0), "0");
+    }
+
+    #[test]
+    fn test_evaluate_median() {
+        let mut sheet = Spreadsheet::new();
+        // Odd number of values
+        assert_eq!(sheet.evaluate_formula("=MEDIAN(1,2,3)", 0, 0), "2");
+        assert_eq!(sheet.evaluate_formula("=MEDIAN(1,3,5,7,9)", 0, 0), "5");
+        assert_eq!(sheet.evaluate_formula("=MEDIAN(10,20,30)", 0, 0), "20");
+        
+        // Even number of values (average of two middle values)
+        assert_eq!(sheet.evaluate_formula("=MEDIAN(1,2,3,4)", 0, 0), "2.5");
+        assert_eq!(sheet.evaluate_formula("=MEDIAN(10,20,30,40)", 0, 0), "25");
+        
+        // Single value
+        assert_eq!(sheet.evaluate_formula("=MEDIAN(5)", 0, 0), "5");
+        
+        // Two values
+        assert_eq!(sheet.evaluate_formula("=MEDIAN(10,20)", 0, 0), "15");
+        
+        // Unsorted values (should still work)
+        assert_eq!(sheet.evaluate_formula("=MEDIAN(3,1,2)", 0, 0), "2");
+        assert_eq!(sheet.evaluate_formula("=MEDIAN(5,1,3,2,4)", 0, 0), "3");
+        
+        assert_eq!(sheet.evaluate_formula("=median(1,2,3)", 0, 0), "2"); // case insensitive
+        
+        // Test with cell references
+        sheet.set_cell(0, 0, "10".to_string());
+        sheet.set_cell(1, 0, "20".to_string());
+        sheet.set_cell(2, 0, "30".to_string());
+        assert_eq!(sheet.evaluate_formula("=MEDIAN(A1:A3)", 0, 0), "20");
+        
+        // Test with range (even number)
+        sheet.set_cell(0, 0, "1".to_string());
+        sheet.set_cell(1, 0, "2".to_string());
+        sheet.set_cell(2, 0, "3".to_string());
+        sheet.set_cell(3, 0, "4".to_string());
+        assert_eq!(sheet.evaluate_formula("=MEDIAN(A1:A4)", 0, 0), "2.5");
+        
+        // Test with mixed arguments (A1:A3 = [1,2,3], plus 40 = [1,2,3,40], median = 2.5)
+        assert_eq!(sheet.evaluate_formula("=MEDIAN(A1:A3,40)", 0, 0), "2.5");
+        
+        // Test with different values to get median of 25
+        sheet.set_cell(0, 0, "10".to_string());
+        sheet.set_cell(1, 0, "20".to_string());
+        sheet.set_cell(2, 0, "30".to_string());
+        assert_eq!(sheet.evaluate_formula("=MEDIAN(A1:A3,40)", 0, 0), "25");
     }
 }

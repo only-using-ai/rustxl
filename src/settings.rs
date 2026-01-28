@@ -5,6 +5,8 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Default)]
 pub struct Settings {
     pub dark_mode: bool,
+    /// If true, do not show the "new version available" prompt
+    pub hide_update_prompt: bool,
 }
 
 impl Settings {
@@ -46,6 +48,9 @@ impl Settings {
                         "dark_mode" => {
                             settings.dark_mode = value == "true" || value == "1";
                         }
+                        "hide_update_prompt" => {
+                            settings.hide_update_prompt = value == "true" || value == "1";
+                        }
                         _ => {} // Ignore unknown keys
                     }
                 }
@@ -67,6 +72,7 @@ impl Settings {
         let mut file = fs::File::create(&path)?;
         writeln!(file, "# xl spreadsheet settings")?;
         writeln!(file, "dark_mode={}", self.dark_mode)?;
+        writeln!(file, "hide_update_prompt={}", self.hide_update_prompt)?;
 
         Ok(())
     }
@@ -74,6 +80,12 @@ impl Settings {
     /// Update and save a single setting
     pub fn set_dark_mode(&mut self, dark_mode: bool) {
         self.dark_mode = dark_mode;
+        let _ = self.save(); // Ignore errors on save
+    }
+
+    /// Update and save the "don't show update prompt again" setting
+    pub fn set_hide_update_prompt(&mut self, hide: bool) {
+        self.hide_update_prompt = hide;
         let _ = self.save(); // Ignore errors on save
     }
 }
@@ -86,6 +98,7 @@ mod tests {
     fn test_default_settings() {
         let settings = Settings::default();
         assert!(!settings.dark_mode);
+        assert!(!settings.hide_update_prompt);
     }
 
     #[test]

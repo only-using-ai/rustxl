@@ -54,9 +54,15 @@
                 <img src="images/logo.svg" alt="RustXL Logo" width="120" height="120">
             </div>
             <div class="hero-badge">Built with Rust</div>
+            <div class="hero-version">Version 0.1.6</div>
             <h1>Spreadsheets in your terminal</h1>
             <p class="hero-subtitle">A fast, keyboard-driven spreadsheet with vim-style navigation and Excel-compatible
                 formulas. No GUI needed.</p>
+            <div class="hero-formula-highlight">
+                <div class="formula-highlight-label">Featured Formula</div>
+                <code class="formula-highlight-code">=SHELL("gemini -p 'prompt'")</code>
+                <p class="formula-highlight-desc">Execute shell commands directly in your spreadsheet cells</p>
+            </div>
             <div class="hero-actions">
                 <a href="#installation" class="btn btn-primary">
                     Get Started
@@ -109,7 +115,7 @@
                             <circle cx="19" cy="17" r="2" />
                         </svg>
                     </div>
-                    <h3>20+ Formulas</h3>
+                    <h3>35+ Formulas</h3>
                     <p>Excel-compatible functions including SUM, AVG, IF, VLOOKUP, CONCATENATE, and more. Even execute
                         shell commands with SHELL().</p>
                 </div>
@@ -407,6 +413,34 @@
                             <code>=CORREL(A1:A10, B1:B10)</code>
                             <span>Correlation coefficient</span>
                         </div>
+                        <div class="formula-item">
+                            <code>=ABS(A1)</code>
+                            <span>Absolute value</span>
+                        </div>
+                        <div class="formula-item">
+                            <code>=INT(A1)</code>
+                            <span>Integer part of number</span>
+                        </div>
+                        <div class="formula-item">
+                            <code>=MOD(A1, B1)</code>
+                            <span>Modulo (remainder)</span>
+                        </div>
+                        <div class="formula-item">
+                            <code>=SQRT(A1)</code>
+                            <span>Square root</span>
+                        </div>
+                        <div class="formula-item">
+                            <code>=POWER(A1, 2)</code>
+                            <span>Raise to power</span>
+                        </div>
+                        <div class="formula-item">
+                            <code>=PRODUCT(A1:A10)</code>
+                            <span>Product of values</span>
+                        </div>
+                        <div class="formula-item">
+                            <code>=MEDIAN(A1:A10)</code>
+                            <span>Median value</span>
+                        </div>
                     </div>
                 </div>
                 <div class="formula-category">
@@ -434,6 +468,22 @@
                         <div class="formula-item">
                             <code>=AVERAGEIF(A1:A10, ">5")</code>
                             <span>Average matching criteria</span>
+                        </div>
+                        <div class="formula-item">
+                            <code>=AND(A1>5, B1<10)</code>
+                            <span>Logical AND</span>
+                        </div>
+                        <div class="formula-item">
+                            <code>=OR(A1>5, B1<10)</code>
+                            <span>Logical OR</span>
+                        </div>
+                        <div class="formula-item">
+                            <code>=NOT(A1>5)</code>
+                            <span>Logical NOT</span>
+                        </div>
+                        <div class="formula-item">
+                            <code>=IFERROR(A1/B1, "Error")</code>
+                            <span>Return value if error</span>
                         </div>
                     </div>
                 </div>
@@ -472,6 +522,22 @@
                             <code>=LEN(A1)</code>
                             <span>Length of text</span>
                         </div>
+                        <div class="formula-item">
+                            <code>=TRIM(A1)</code>
+                            <span>Remove leading/trailing spaces</span>
+                        </div>
+                        <div class="formula-item">
+                            <code>=UPPER(A1)</code>
+                            <span>Convert to uppercase</span>
+                        </div>
+                        <div class="formula-item">
+                            <code>=LOWER(A1)</code>
+                            <span>Convert to lowercase</span>
+                        </div>
+                        <div class="formula-item">
+                            <code>=PROPER(A1)</code>
+                            <span>Capitalize first letter of each word</span>
+                        </div>
                     </div>
                 </div>
                 <div class="formula-category">
@@ -488,9 +554,9 @@
                             <code>=VLOOKUP(A1, B1:D10, 2)</code>
                             <span>Vertical lookup</span>
                         </div>
-                        <div class="formula-item">
-                            <code>=SHELL("date")</code>
-                            <span>Execute shell command</span>
+                        <div class="formula-item formula-featured">
+                            <code>=SHELL("gemini -p 'prompt'")</code>
+                            <span>Execute shell command and display output</span>
                         </div>
                     </div>
                 </div>

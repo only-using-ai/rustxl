@@ -108,10 +108,11 @@ fn main() -> io::Result<()> {
     
     // Load settings
     let settings = settings::Settings::load();
-    
+
     // Now create and populate the spreadsheet
     let mut spreadsheet = crate::spreadsheet::Spreadsheet::new();
     spreadsheet.dark_mode = settings.dark_mode;
+    spreadsheet.hide_update_prompt = settings.hide_update_prompt;
     
     if let Some(data) = piped_data {
         // Load data from the buffer we read earlier

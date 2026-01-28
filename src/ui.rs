@@ -1,8 +1,8 @@
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table},
+    text::{Line, Span, Text},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap},
     Frame,
 };
 
@@ -71,12 +71,21 @@ pub fn render(f: &mut Frame, spreadsheet: &mut Spreadsheet) {
     let has_stats = spreadsheet.get_selection_stats().is_some();
     // Check if we need to show update prompt or message
     let has_update = spreadsheet.update_prompt_shown || spreadsheet.update_message.is_some();
+    // Check if we need to show autocomplete suggestions
+    let has_autocomplete = spreadsheet.formula_autocomplete_active && !spreadsheet.formula_suggestions.is_empty();
+    let autocomplete_height = if has_autocomplete {
+        // Show up to 5 suggestions, plus borders
+        (spreadsheet.formula_suggestions.len().min(5) + 2) as u16
+    } else {
+        0
+    };
 
-    let chunks = match (has_stats, has_update) {
+    // Update bar is now rendered as a floating widget, so we don't include it in the layout
+    let chunks = match (has_stats, has_autocomplete) {
         (true, true) => Layout::vertical([
             Constraint::Length(3),
+            Constraint::Length(autocomplete_height),
             Constraint::Min(5),
-            Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
         ])
@@ -90,8 +99,8 @@ pub fn render(f: &mut Frame, spreadsheet: &mut Spreadsheet) {
         .split(area),
         (false, true) => Layout::vertical([
             Constraint::Length(3),
+            Constraint::Length(autocomplete_height),
             Constraint::Min(5),
-            Constraint::Length(1),
             Constraint::Length(1),
         ])
         .split(area),
@@ -104,12 +113,11 @@ pub fn render(f: &mut Frame, spreadsheet: &mut Spreadsheet) {
     };
 
     let formula_bar_area = chunks[0];
-    let grid_area = chunks[1];
-    let (stats_area, update_area, status_area) = match (has_stats, has_update) {
-        (true, true) => (Some(chunks[2]), Some(chunks[3]), chunks[4]),
-        (true, false) => (Some(chunks[2]), None, chunks[3]),
-        (false, true) => (None, Some(chunks[2]), chunks[3]),
-        (false, false) => (None, None, chunks[2]),
+    let (autocomplete_area, grid_area, stats_area, status_area) = match (has_stats, has_autocomplete) {
+        (true, true) => (Some(chunks[1]), chunks[2], Some(chunks[3]), chunks[4]),
+        (true, false) => (None, chunks[1], Some(chunks[2]), chunks[3]),
+        (false, true) => (Some(chunks[1]), chunks[2], None, chunks[3]),
+        (false, false) => (None, chunks[1], None, chunks[2]),
     };
 
     spreadsheet.adjust_scroll(grid_area);
@@ -118,14 +126,19 @@ pub fn render(f: &mut Frame, spreadsheet: &mut Spreadsheet) {
     let visible_rows = spreadsheet.visible_rows(area.height);
 
     render_formula_bar(f, spreadsheet, formula_bar_area);
+    if let Some(autocomplete_area) = autocomplete_area {
+        render_autocomplete(f, spreadsheet, autocomplete_area);
+    }
     render_grid(f, spreadsheet, grid_area, visible_cols, visible_rows);
     if let Some(stats_area) = stats_area {
         render_stats_bar(f, spreadsheet, stats_area);
     }
-    if let Some(update_area) = update_area {
-        render_update_bar(f, spreadsheet, update_area);
-    }
     render_status_bar(f, spreadsheet, status_area);
+    
+    // Render update prompt as floating widget in bottom right corner
+    if has_update {
+        render_update_bar(f, spreadsheet, area);
+    }
 }
 
 fn render_formula_bar(f: &mut Frame, spreadsheet: &Spreadsheet, area: Rect) {
@@ -178,6 +191,67 @@ fn render_formula_bar(f: &mut Frame, spreadsheet: &Spreadsheet, area: Rect) {
     let formula = Paragraph::new(formula_display)
         .style(Style::default().bg(formula_bg).fg(text_fg));
     f.render_widget(formula, formula_bar_inner[2]);
+}
+
+fn render_autocomplete(f: &mut Frame, spreadsheet: &Spreadsheet, area: Rect) {
+    if !spreadsheet.formula_autocomplete_active || spreadsheet.formula_suggestions.is_empty() {
+        return;
+    }
+
+    // Choose colors based on dark mode
+    let (bg_color, fg_color, selected_bg, grid_color) = if spreadsheet.dark_mode {
+        (DARK_FORMULA_BAR_BG, DARK_CELL_FG, DARK_SELECTED_BG, DARK_GRID_COLOR)
+    } else {
+        (FORMULA_BAR_BG, CELL_FG, SELECTED_BG, GRID_COLOR)
+    };
+
+    // Show up to 5 suggestions
+    let max_items = spreadsheet.formula_suggestions.len().min(5);
+    let items: Vec<Line> = spreadsheet.formula_suggestions
+        .iter()
+        .take(max_items)
+        .enumerate()
+        .map(|(idx, formula)| {
+            let is_selected = idx == spreadsheet.formula_suggestion_index;
+            let bg = if is_selected { selected_bg } else { bg_color };
+            Line::from(vec![
+                Span::styled(
+                    format!("  {}", formula),
+                    Style::default().bg(bg).fg(fg_color),
+                )
+            ])
+        })
+        .collect();
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(grid_color))
+        .style(Style::default().bg(bg_color));
+    
+    let inner_area = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+
+    f.render_widget(block, area);
+    
+    // Render each suggestion
+    for (idx, line) in items.iter().enumerate() {
+        let y = inner_area.y + idx as u16;
+        if y < inner_area.y + inner_area.height {
+            f.render_widget(
+                Paragraph::new(line.clone()).style(line.spans[0].style),
+                Rect {
+                    x: inner_area.x,
+                    y,
+                    width: inner_area.width,
+                    height: 1,
+                },
+            );
+        }
+    }
 }
 
 fn render_grid(
@@ -960,9 +1034,9 @@ fn render_ready_status<'a>(mode: &'a str, mode_style: Style) -> Line<'a> {
     ])
 }
 
-fn render_update_bar(f: &mut Frame, spreadsheet: &Spreadsheet, area: Rect) {
-    let line = if spreadsheet.update_in_progress {
-        Line::from(vec![
+fn render_update_bar(f: &mut Frame, spreadsheet: &Spreadsheet, terminal_area: Rect) {
+    let text = if spreadsheet.update_in_progress {
+        Text::from(Line::from(vec![
             Span::styled(
                 " UPDATE ",
                 Style::default().bg(Color::Rgb(0, 150, 136)).fg(Color::White),
@@ -971,11 +1045,11 @@ fn render_update_bar(f: &mut Frame, spreadsheet: &Spreadsheet, area: Rect) {
                 "  Downloading update...",
                 Style::default().fg(Color::Yellow),
             ),
-        ])
+        ]))
     } else if let Some(ref msg) = spreadsheet.update_message {
         // Show update result message
         let is_success = msg.contains("Updated to") || msg.contains("restart");
-        Line::from(vec![
+        Text::from(Line::from(vec![
             Span::styled(
                 " UPDATE ",
                 Style::default().bg(Color::Rgb(0, 150, 136)).fg(Color::White),
@@ -988,10 +1062,10 @@ fn render_update_bar(f: &mut Frame, spreadsheet: &Spreadsheet, area: Rect) {
                     Color::Red
                 }),
             ),
-        ])
+        ]))
     } else if spreadsheet.update_prompt_shown {
         if let Some(ref info) = spreadsheet.update_available {
-            Line::from(vec![
+            Text::from(Line::from(vec![
                 Span::styled(
                     " UPDATE ",
                     Style::default().bg(Color::Rgb(0, 150, 136)).fg(Color::White),
@@ -1006,17 +1080,57 @@ fn render_update_bar(f: &mut Frame, spreadsheet: &Spreadsheet, area: Rect) {
                 Span::styled("y", Style::default().fg(Color::Yellow)),
                 Span::styled(" Update  ", Style::default().fg(Color::DarkGray)),
                 Span::styled("n", Style::default().fg(Color::Yellow)),
-                Span::styled(" Skip", Style::default().fg(Color::DarkGray)),
-            ])
+                Span::styled(" Skip  ", Style::default().fg(Color::DarkGray)),
+                Span::styled("d", Style::default().fg(Color::Yellow)),
+                Span::styled(" Don't show again", Style::default().fg(Color::DarkGray)),
+            ]))
         } else {
-            Line::default()
+            Text::default()
         }
     } else {
-        Line::default()
+        Text::default()
     };
 
+    // Calculate the width needed for the update message
+    // Limit width to 60% of terminal width or 80 chars, whichever is smaller
+    let max_width = (terminal_area.width * 60 / 100).min(80);
+    let update_width = max_width.min(terminal_area.width);
+    // Allow up to 4 lines of wrapped text (enough for the prompt with all options)
+    let update_height = 6.min(terminal_area.height.saturating_sub(2)); // 4 lines + 2 for borders
+    
+    // Position in bottom right corner, above the status bar
+    // Status bar is 1 line at the bottom, so position update bar above it
+    let padding = 1;
+    let status_bar_height = 1;
+    let update_x = terminal_area.x + terminal_area.width.saturating_sub(update_width + padding);
+    let update_y = terminal_area.y + terminal_area.height.saturating_sub(update_height + status_bar_height + padding);
+    
+    let update_area = Rect {
+        x: update_x,
+        y: update_y,
+        width: update_width,
+        height: update_height,
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Rgb(0, 150, 136)))
+        .style(Style::default().bg(Color::Rgb(35, 45, 45)));
+    
+    f.render_widget(block, update_area);
+    
+    // Render the text inside the block with wrapping
+    let inner_area = Rect {
+        x: update_area.x + 1,
+        y: update_area.y + 1,
+        width: update_area.width.saturating_sub(2),
+        height: update_area.height.saturating_sub(2),
+    };
+    
     f.render_widget(
-        Paragraph::new(line).style(Style::default().bg(Color::Rgb(35, 45, 45))),
-        area,
+        Paragraph::new(text)
+            .wrap(Wrap { trim: true })
+            .style(Style::default().bg(Color::Rgb(35, 45, 45))),
+        inner_area,
     );
 }

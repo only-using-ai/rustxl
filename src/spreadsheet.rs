@@ -74,6 +74,13 @@ pub struct Spreadsheet {
     pub update_prompt_shown: bool,
     pub update_in_progress: bool,
     pub update_message: Option<String>,
+    /// If true, user chose "don't show again" (persisted in ~/.xlrc)
+    pub hide_update_prompt: bool,
+    // Formula autocomplete
+    pub formula_autocomplete_active: bool,
+    pub formula_suggestions: Vec<String>,
+    pub formula_suggestion_index: usize,
+    pub formula_prefix: String,
 }
 
 impl Spreadsheet {
@@ -123,6 +130,11 @@ impl Spreadsheet {
             update_prompt_shown: false,
             update_in_progress: false,
             update_message: None,
+            hide_update_prompt: false,
+            formula_autocomplete_active: false,
+            formula_suggestions: Vec::new(),
+            formula_suggestion_index: 0,
+            formula_prefix: String::new(),
         }
     }
 
@@ -640,6 +652,21 @@ impl Spreadsheet {
         self.ref_anchor = None;
         self.ref_insert_pos = 0;
         self.ref_current_len = 0;
+        // Initialize autocomplete state
+        if self.formula_mode {
+            let after_equals = &self.edit_buffer[1..];
+            let prefix_end = after_equals
+                .char_indices()
+                .find(|(_, ch)| !ch.is_alphabetic())
+                .map(|(i, _)| i)
+                .unwrap_or(after_equals.len());
+            self.formula_prefix = after_equals[..prefix_end].to_string();
+            self.update_formula_suggestions();
+        } else {
+            self.formula_autocomplete_active = false;
+            self.formula_suggestions.clear();
+            self.formula_prefix.clear();
+        }
     }
 
     pub fn finish_editing_with_move(&mut self, dr: isize, dc: isize) {
@@ -672,6 +699,10 @@ impl Spreadsheet {
         self.ref_anchor = None;
         self.ref_insert_pos = 0;
         self.ref_current_len = 0;
+        self.formula_autocomplete_active = false;
+        self.formula_suggestions.clear();
+        self.formula_prefix.clear();
+        self.formula_suggestion_index = 0;
     }
 
     pub fn delete_cell(&mut self) {
@@ -687,15 +718,102 @@ impl Spreadsheet {
         }
     }
 
+    pub fn get_available_formulas() -> Vec<String> {
+        vec![
+            "ABS".to_string(),
+            "AND".to_string(),
+            "AVG".to_string(),
+            "AVERAGEIF".to_string(),
+            "CONCAT".to_string(),
+            "CONCATENATE".to_string(),
+            "CORREL".to_string(),
+            "COUNT".to_string(),
+            "COUNTA".to_string(),
+            "COUNTIF".to_string(),
+            "IF".to_string(),
+            "IFERROR".to_string(),
+            "INT".to_string(),
+            "LEN".to_string(),
+            "LEFT".to_string(),
+            "LOWER".to_string(),
+            "MAX".to_string(),
+            "MEDIAN".to_string(),
+            "MID".to_string(),
+            "MIN".to_string(),
+            "MOD".to_string(),
+            "NOT".to_string(),
+            "OR".to_string(),
+            "POWER".to_string(),
+            "PRODUCT".to_string(),
+            "PROPER".to_string(),
+            "RIGHT".to_string(),
+            "ROUND".to_string(),
+            "SHELL".to_string(),
+            "SQRT".to_string(),
+            "SUM".to_string(),
+            "SUMIF".to_string(),
+            "TRIM".to_string(),
+            "UPPER".to_string(),
+            "VLOOKUP".to_string(),
+        ]
+    }
+
+    pub fn update_formula_suggestions(&mut self) {
+        if !self.formula_mode || self.formula_prefix.is_empty() {
+            self.formula_autocomplete_active = false;
+            self.formula_suggestions.clear();
+            return;
+        }
+
+        let prefix_upper = self.formula_prefix.to_uppercase();
+        let all_formulas = Self::get_available_formulas();
+        
+        let mut suggestions: Vec<String> = all_formulas
+            .into_iter()
+            .filter(|f| f.starts_with(&prefix_upper))
+            .collect();
+        
+        // Sort alphabetically for better UX
+        suggestions.sort();
+        
+        self.formula_suggestions = suggestions;
+        self.formula_autocomplete_active = !self.formula_suggestions.is_empty();
+        if self.formula_suggestion_index >= self.formula_suggestions.len() {
+            self.formula_suggestion_index = 0;
+        }
+    }
+
     pub fn handle_char_input(&mut self, c: char) {
         self.edit_buffer.push(c);
 
         if c == '=' && self.edit_buffer == "=" {
             self.formula_mode = true;
-        }
-
-        if self.formula_mode && c == '(' {
-            self.enter_ref_selection_mode();
+            self.formula_prefix.clear();
+            self.formula_autocomplete_active = false;
+            self.formula_suggestions.clear();
+        } else if self.formula_mode {
+            // Check if we're typing a formula name (letters after =)
+            if c.is_alphabetic() {
+                // Extract the formula prefix (everything after = that's letters)
+                let after_equals = &self.edit_buffer[1..];
+                // Find where the letters end (either at '(' or end of string)
+                let prefix_end = after_equals
+                    .char_indices()
+                    .find(|(_, ch)| !ch.is_alphabetic())
+                    .map(|(i, _)| i)
+                    .unwrap_or(after_equals.len());
+                self.formula_prefix = after_equals[..prefix_end].to_string();
+                self.update_formula_suggestions();
+            } else if c == '(' {
+                // User typed '(', so they're done with the formula name
+                self.formula_autocomplete_active = false;
+                self.formula_suggestions.clear();
+                self.enter_ref_selection_mode();
+            } else {
+                // Non-letter character, disable autocomplete
+                self.formula_autocomplete_active = false;
+                self.formula_suggestions.clear();
+            }
         }
     }
 

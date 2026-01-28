@@ -6,6 +6,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use crate::constants::COLOR_PALETTE;
+use crate::settings;
 use crate::spreadsheet::Spreadsheet;
 use crate::types::{DataType, RowColumnSelectMode, SaveFormat, TextAlignment, VerticalAlignment, VisualSubMode};
 use crate::ui;
@@ -23,11 +24,14 @@ pub fn run_app(
             match msg {
                 UpdateMessage::Available(info) => {
                     spreadsheet.update_available = Some(info);
-                    spreadsheet.update_prompt_shown = true;
+                    if !spreadsheet.hide_update_prompt {
+                        spreadsheet.update_prompt_shown = true;
+                    }
                 }
                 UpdateMessage::NotAvailable => {}
                 UpdateMessage::Error(_) => {
-                    // Silently ignore update check errors
+                    // Silently ignore update check errors (network issues, etc.)
+                    // The update check will be retried on next launch
                 }
             }
         }
@@ -126,6 +130,15 @@ fn handle_update_prompt(spreadsheet: &mut Spreadsheet, code: KeyCode) -> bool {
             spreadsheet.update_message = None;
             true
         }
+        KeyCode::Char('d') | KeyCode::Char('D') => {
+            spreadsheet.hide_update_prompt = true;
+            spreadsheet.update_prompt_shown = false;
+            spreadsheet.update_available = None;
+            spreadsheet.update_message = None;
+            let mut s = settings::Settings::load();
+            s.set_hide_update_prompt(true);
+            true
+        }
         _ => false,
     }
 }
@@ -166,20 +179,88 @@ fn handle_ref_selection_mode(spreadsheet: &mut Spreadsheet, code: KeyCode, shift
 
 fn handle_normal_editing(spreadsheet: &mut Spreadsheet, code: KeyCode) {
     match code {
-        KeyCode::Enter => spreadsheet.finish_editing(),
-        KeyCode::Up => spreadsheet.finish_editing_with_move(-1, 0),
-        KeyCode::Down => spreadsheet.finish_editing_with_move(1, 0),
+        KeyCode::Enter => {
+            if spreadsheet.formula_autocomplete_active && !spreadsheet.formula_suggestions.is_empty() {
+                // Select the current suggestion
+                let selected = &spreadsheet.formula_suggestions[spreadsheet.formula_suggestion_index];
+                // Replace the prefix in edit_buffer with the full formula name
+                let prefix_start = spreadsheet.edit_buffer.find('=').unwrap_or(0) + 1;
+                let prefix_end = prefix_start + spreadsheet.formula_prefix.len();
+                spreadsheet.edit_buffer.replace_range(prefix_start..prefix_end, selected);
+                spreadsheet.edit_buffer.push('(');
+                spreadsheet.formula_autocomplete_active = false;
+                spreadsheet.formula_suggestions.clear();
+                spreadsheet.formula_prefix.clear();
+                spreadsheet.enter_ref_selection_mode();
+            } else {
+                spreadsheet.finish_editing();
+            }
+        }
+        KeyCode::Up => {
+            if spreadsheet.formula_autocomplete_active && !spreadsheet.formula_suggestions.is_empty() {
+                // Navigate up in suggestions
+                if spreadsheet.formula_suggestion_index > 0 {
+                    spreadsheet.formula_suggestion_index -= 1;
+                } else {
+                    spreadsheet.formula_suggestion_index = spreadsheet.formula_suggestions.len() - 1;
+                }
+            } else {
+                spreadsheet.finish_editing_with_move(-1, 0);
+            }
+        }
+        KeyCode::Down => {
+            if spreadsheet.formula_autocomplete_active && !spreadsheet.formula_suggestions.is_empty() {
+                // Navigate down in suggestions
+                spreadsheet.formula_suggestion_index = (spreadsheet.formula_suggestion_index + 1) % spreadsheet.formula_suggestions.len();
+            } else {
+                spreadsheet.finish_editing_with_move(1, 0);
+            }
+        }
         KeyCode::Left => spreadsheet.finish_editing_with_move(0, -1),
         KeyCode::Right => spreadsheet.finish_editing_with_move(0, 1),
-        KeyCode::Esc => spreadsheet.cancel_editing(),
+        KeyCode::Esc => {
+            spreadsheet.formula_autocomplete_active = false;
+            spreadsheet.formula_suggestions.clear();
+            spreadsheet.cancel_editing();
+        }
         KeyCode::Backspace => {
             spreadsheet.edit_buffer.pop();
             spreadsheet.formula_mode = spreadsheet.edit_buffer.starts_with('=');
+            if spreadsheet.formula_mode {
+                // Update suggestions after backspace
+                let after_equals = &spreadsheet.edit_buffer[1..];
+                let prefix_end = after_equals
+                    .char_indices()
+                    .find(|(_, ch)| !ch.is_alphabetic())
+                    .map(|(i, _)| i)
+                    .unwrap_or(after_equals.len());
+                spreadsheet.formula_prefix = after_equals[..prefix_end].to_string();
+                spreadsheet.update_formula_suggestions();
+            } else {
+                spreadsheet.formula_autocomplete_active = false;
+                spreadsheet.formula_suggestions.clear();
+                spreadsheet.formula_prefix.clear();
+            }
         }
         KeyCode::Char(c) => {
             spreadsheet.handle_char_input(c);
         }
-        KeyCode::Tab => spreadsheet.finish_editing_with_move(0, 1),
+        KeyCode::Tab => {
+            if spreadsheet.formula_autocomplete_active && !spreadsheet.formula_suggestions.is_empty() {
+                // Select the current suggestion (same as Enter)
+                let selected = &spreadsheet.formula_suggestions[spreadsheet.formula_suggestion_index];
+                let prefix_start = spreadsheet.edit_buffer.find('=').unwrap_or(0) + 1;
+                let prefix_end = prefix_start + spreadsheet.formula_prefix.len();
+                spreadsheet.edit_buffer.replace_range(prefix_start..prefix_end, selected);
+                spreadsheet.edit_buffer.push('(');
+                spreadsheet.formula_autocomplete_active = false;
+                spreadsheet.formula_suggestions.clear();
+                spreadsheet.formula_prefix.clear();
+                spreadsheet.enter_ref_selection_mode();
+            } else {
+                spreadsheet.finish_editing_with_move(0, 1);
+            }
+        }
         _ => {}
     }
 }
