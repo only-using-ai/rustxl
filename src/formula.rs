@@ -76,7 +76,7 @@ impl Spreadsheet {
 
         // Handle SUMIF function (case-insensitive)
         if expr_upper.starts_with("SUMIF(") && expr_upper.ends_with(')') {
-            let inner = &expr[7..expr.len() - 1];
+            let inner = &expr[6..expr.len() - 1];
             return self.evaluate_sumif(inner, row, col);
         }
 
