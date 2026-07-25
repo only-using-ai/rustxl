@@ -1,8 +1,10 @@
 mod constants;
 mod formula;
+mod hit_test;
 mod input;
 mod save;
 mod settings;
+mod sheet;
 mod spreadsheet;
 mod style;
 mod types;

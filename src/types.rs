@@ -56,7 +56,7 @@ pub enum SaveFormat {
     Tsv,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowColumnSelectMode {
     None,
     RowSelect,

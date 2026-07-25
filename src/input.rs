@@ -2,10 +2,13 @@ use std::io;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use crate::constants::COLOR_PALETTE;
+use crate::hit_test::{hit_test, HitTarget};
 use crate::settings;
 use crate::spreadsheet::Spreadsheet;
 use crate::types::{DataType, RowColumnSelectMode, SaveFormat, TextAlignment, VerticalAlignment, VisualSubMode};
@@ -79,7 +82,10 @@ pub fn run_app(
                         }
                     }
                 }
-                Ok(_) => {} // Ignore non-key events
+                Ok(Event::Mouse(mouse)) => {
+                    handle_mouse(&mut spreadsheet, mouse);
+                }
+                Ok(_) => {} // Ignore the remaining event kinds
                 Err(e) => {
                     // If we can't read events, it might be a terminal issue
                     // Try to restore terminal and exit gracefully
@@ -94,6 +100,72 @@ pub fn run_app(
                 }
             }
         }
+    }
+}
+
+/// How many rows one notch of the wheel moves.
+const ROW_SCROLL_STEP: isize = 3;
+
+/// How many columns one notch of the horizontal wheel moves.
+///
+/// One, not three. A column is ten characters wide by default and a row is one
+/// line tall, so moving three of each would make a sideways notch travel about
+/// ten times as far across the screen as a vertical one — the grid jumps
+/// instead of scrolling, and it stops being obvious where you ended up.
+const COLUMN_SCROLL_STEP: isize = 1;
+
+/// Acts on a mouse event, if the grid is the thing the user is looking at.
+///
+/// Returns whether anything changed.
+///
+/// Clicks are ignored whenever a modal owns the screen — saving, opening, the
+/// command line, the update prompt, or an in-progress edit. A click that changed
+/// the grid behind a dialog would be a state change the user never saw, which is
+/// the worst kind: silent. Ignoring is the safe default; a mode that wants the
+/// mouse can ask for it later.
+pub fn handle_mouse(spreadsheet: &mut Spreadsheet, event: MouseEvent) -> bool {
+    let modal_owns_the_screen = spreadsheet.editing
+        || spreadsheet.command_mode
+        || spreadsheet.open_mode
+        || spreadsheet.save_mode
+        || spreadsheet.update_prompt_shown
+        || spreadsheet.update_in_progress;
+    if modal_owns_the_screen {
+        return false;
+    }
+
+    let geometry = spreadsheet.grid_geometry.clone();
+    let target = hit_test(event.column, event.row, &geometry);
+    let sideways = event.modifiers.contains(KeyModifiers::SHIFT);
+
+    match event.kind {
+        // Shift turns the vertical wheel sideways. Spreadsheets and browsers
+        // have done this for long enough that it is what people try, and it is
+        // the only horizontal scrolling available on a mouse that has no thumb
+        // wheel.
+        MouseEventKind::ScrollDown if sideways => {
+            spreadsheet.scroll_grid_horizontally(COLUMN_SCROLL_STEP)
+        }
+        MouseEventKind::ScrollUp if sideways => {
+            spreadsheet.scroll_grid_horizontally(-COLUMN_SCROLL_STEP)
+        }
+        MouseEventKind::ScrollDown => spreadsheet.scroll_grid_vertically(ROW_SCROLL_STEP),
+        MouseEventKind::ScrollUp => spreadsheet.scroll_grid_vertically(-ROW_SCROLL_STEP),
+        MouseEventKind::ScrollRight => spreadsheet.scroll_grid_horizontally(COLUMN_SCROLL_STEP),
+        MouseEventKind::ScrollLeft => spreadsheet.scroll_grid_horizontally(-COLUMN_SCROLL_STEP),
+        MouseEventKind::Down(MouseButton::Left) => match target {
+            HitTarget::Cell { row, col } => spreadsheet.select_cell(row, col),
+            HitTarget::ColumnHeader(col) => spreadsheet.select_whole_column(col),
+            HitTarget::RowHeader(row) => spreadsheet.select_whole_row(row),
+            HitTarget::SheetIndicator => spreadsheet.next_sheet(),
+            HitTarget::Outside => false,
+        },
+        // Dragging extends the selection from wherever the press started.
+        MouseEventKind::Drag(MouseButton::Left) => match target {
+            HitTarget::Cell { row, col } => spreadsheet.extend_selection_to(row, col),
+            _ => false,
+        },
+        _ => false,
     }
 }
 
@@ -585,6 +657,16 @@ fn handle_ready_mode(
             return false;
         }
         // PageDown/PageUp for jumping to last/first row (alternative to Cmd+Down/Up)
+        // Sheet navigation, matching Excel. These must come before the
+        // unmodified Page keys below, which would otherwise swallow them.
+        KeyCode::PageDown if ctrl_or_cmd => {
+            spreadsheet.next_sheet();
+            return false;
+        }
+        KeyCode::PageUp if ctrl_or_cmd => {
+            spreadsheet.previous_sheet();
+            return false;
+        }
         KeyCode::PageDown => {
             spreadsheet.jump_to_last_row();
             return false;
@@ -872,5 +954,412 @@ mod tests {
 
         assert!(!sheet.editing);
         assert_eq!(sheet.get_cell(0, 0), "test");
+    }
+}
+
+#[cfg(test)]
+mod sheet_navigation_keys {
+    use super::*;
+    use crate::sheet::Sheet;
+
+    fn workbook() -> Spreadsheet {
+        let mut sheet = Spreadsheet::new();
+        sheet.replace_sheets(vec![Sheet::new("Alpha"), Sheet::new("Beta")]);
+        sheet
+    }
+
+    #[test]
+    fn ctrl_page_keys_move_between_sheets() {
+        let mut sheet = workbook();
+
+        handle_ready_mode(&mut sheet, KeyCode::PageDown, KeyModifiers::CONTROL);
+        assert_eq!(sheet.active_sheet_name(), "Beta");
+
+        handle_ready_mode(&mut sheet, KeyCode::PageUp, KeyModifiers::CONTROL);
+        assert_eq!(sheet.active_sheet_name(), "Alpha");
+    }
+
+    /// The plain Page keys still jump within the sheet, as they always have.
+    ///
+    /// The sheet arms are matched first, so this is the check that they did not
+    /// swallow the unmodified keys.
+    #[test]
+    fn unmodified_page_keys_still_jump_inside_the_sheet() {
+        let mut sheet = workbook();
+        // The Page keys jump between the populated rows of the current column,
+        // so the column needs a top and a bottom to travel between.
+        sheet.set_cell(5, 0, "top".to_string());
+        sheet.set_cell(20, 0, "bottom".to_string());
+        sheet.cursor_row = 10;
+
+        handle_ready_mode(&mut sheet, KeyCode::PageDown, KeyModifiers::empty());
+        assert_eq!(sheet.active_sheet_name(), "Alpha", "still on the same sheet");
+        assert_eq!(sheet.cursor_row, 20, "moved to the last populated row");
+
+        handle_ready_mode(&mut sheet, KeyCode::PageUp, KeyModifiers::empty());
+        assert_eq!(sheet.active_sheet_name(), "Alpha");
+        assert_eq!(sheet.cursor_row, 5, "moved to the first populated row");
+    }
+
+    /// Typing a letter edits the cell; it must not be read as a sheet command.
+    ///
+    /// `handle_ready_mode` ends in a `KeyCode::Char(c)` catch-all that starts
+    /// editing, which is why a two-key sequence like vim's `gt` cannot be used
+    /// for sheet navigation here.
+    #[test]
+    fn letters_still_start_editing_rather_than_switching_sheets() {
+        let mut sheet = workbook();
+
+        handle_ready_mode(&mut sheet, KeyCode::Char('g'), KeyModifiers::empty());
+
+        assert_eq!(sheet.active_sheet_name(), "Alpha");
+        assert!(sheet.editing, "a letter begins a cell edit");
+    }
+
+    /// Tab keeps opening Visual mode, which is why it is not the sheet key.
+    #[test]
+    fn tab_still_opens_visual_mode() {
+        let mut sheet = workbook();
+
+        handle_ready_mode(&mut sheet, KeyCode::Tab, KeyModifiers::empty());
+
+        assert!(sheet.visual_mode);
+        assert_eq!(sheet.active_sheet_name(), "Alpha");
+    }
+}
+
+#[cfg(test)]
+mod mouse_input {
+    use super::*;
+    use crate::hit_test::GridGeometry;
+    use crate::sheet::Sheet;
+    use ratatui::layout::Rect;
+
+    /// A grid drawn at the origin: 5-wide row numbers, three 10-wide columns,
+    /// eight single-height rows, showing the top-left of the sheet.
+    fn grid() -> GridGeometry {
+        GridGeometry {
+            area: Rect {
+                x: 0,
+                y: 0,
+                width: 40,
+                height: 12,
+            },
+            row_header_width: 5,
+            scroll_col: 0,
+            col_widths: vec![10, 10, 10],
+            scroll_row: 0,
+            row_heights: vec![1; 8],
+            sheet_indicator_width: 13,
+        }
+    }
+
+    fn sheet() -> Spreadsheet {
+        let mut sheet = Spreadsheet::new();
+        sheet.grid_geometry = grid();
+        sheet
+    }
+
+    fn at(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::empty(),
+        }
+    }
+
+    fn click(column: u16, row: u16) -> MouseEvent {
+        at(MouseEventKind::Down(MouseButton::Left), column, row)
+    }
+
+    fn with_shift(kind: MouseEventKind) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: 10,
+            row: 5,
+            modifiers: KeyModifiers::SHIFT,
+        }
+    }
+
+    #[test]
+    fn clicking_a_cell_moves_the_cursor_there() {
+        let mut sheet = sheet();
+
+        assert!(handle_mouse(&mut sheet, click(16, 4)));
+
+        assert_eq!((sheet.cursor_row, sheet.cursor_col), (2, 1));
+        assert_eq!(sheet.selection_anchor, None);
+    }
+
+    #[test]
+    fn clicking_outside_the_grid_does_nothing() {
+        let mut sheet = sheet();
+        sheet.cursor_row = 3;
+        sheet.cursor_col = 2;
+
+        assert!(!handle_mouse(&mut sheet, click(0, 0)), "the corner");
+        assert!(!handle_mouse(&mut sheet, click(39, 5)), "the right border");
+
+        assert_eq!((sheet.cursor_row, sheet.cursor_col), (3, 2));
+    }
+
+    #[test]
+    fn dragging_grows_the_selection_from_where_it_started() {
+        let mut sheet = sheet();
+        handle_mouse(&mut sheet, click(6, 2));
+
+        assert!(handle_mouse(
+            &mut sheet,
+            at(MouseEventKind::Drag(MouseButton::Left), 26, 5)
+        ));
+
+        assert_eq!(sheet.selection_anchor, Some((0, 0)));
+        assert_eq!((sheet.cursor_row, sheet.cursor_col), (3, 2));
+    }
+
+    #[test]
+    fn clicking_a_column_letter_selects_that_column() {
+        let mut sheet = sheet();
+
+        assert!(handle_mouse(&mut sheet, click(16, 1)));
+
+        assert_eq!(sheet.selected_cols, Some((1, 1)));
+        assert_eq!(sheet.row_column_select_mode, RowColumnSelectMode::ColumnSelect);
+    }
+
+    #[test]
+    fn clicking_a_row_number_selects_that_row() {
+        let mut sheet = sheet();
+
+        assert!(handle_mouse(&mut sheet, click(2, 4)));
+
+        assert_eq!(sheet.selected_rows, Some((2, 2)));
+        assert_eq!(sheet.row_column_select_mode, RowColumnSelectMode::RowSelect);
+    }
+
+    #[test]
+    fn clicking_the_sheet_name_moves_to_the_next_sheet() {
+        let mut sheet = sheet();
+        sheet.replace_sheets(vec![Sheet::new("Alpha"), Sheet::new("Beta")]);
+        sheet.grid_geometry = grid();
+
+        assert!(handle_mouse(&mut sheet, click(4, 0)));
+
+        assert_eq!(sheet.active_sheet_name(), "Beta");
+    }
+
+    /// The wheel moves the view, and the cursor rides along.
+    ///
+    /// Leaving the cursor behind would look tidier, but the renderer keeps the
+    /// cursor on screen and would drag the view straight back — see
+    /// `the_wheel_still_has_an_effect_once_the_frame_is_drawn`.
+    #[test]
+    fn the_wheel_scrolls_the_view_and_takes_the_cursor_with_it() {
+        let mut sheet = sheet();
+        let (row, col) = (sheet.cursor_row, sheet.cursor_col);
+
+        assert!(handle_mouse(&mut sheet, at(MouseEventKind::ScrollDown, 10, 5)));
+        assert_eq!(sheet.scroll_row, 3);
+        assert_eq!(sheet.cursor_row, row + 3, "the cursor followed the view");
+        assert_eq!(sheet.cursor_col, col, "and nothing moved sideways");
+
+        let back = at(MouseEventKind::ScrollUp, 10, 5);
+        assert!(handle_mouse(&mut sheet, back));
+        assert_eq!(sheet.scroll_row, 0);
+        assert_eq!(sheet.cursor_row, row, "scrolling back returns the cursor");
+    }
+
+    /// Scrolling has to survive the frame that comes after it.
+    ///
+    /// The renderer calls `adjust_scroll` on every frame to keep the cursor on
+    /// screen. A wheel event that moved the view away from the cursor was
+    /// therefore undone before the user ever saw it: the test above passed
+    /// while the wheel did nothing at all.
+    #[test]
+    fn the_wheel_still_has_an_effect_once_the_frame_is_drawn() {
+        let mut sheet = sheet();
+        let area = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        };
+
+        let wheel = at(MouseEventKind::ScrollDown, 10, 5);
+        assert!(handle_mouse(&mut sheet, wheel));
+        let scrolled_to = sheet.scroll_row;
+        assert!(scrolled_to > 0, "the wheel moved the view");
+
+        sheet.adjust_scroll(area);
+
+        assert_eq!(
+            sheet.scroll_row, scrolled_to,
+            "drawing the next frame undid the scroll"
+        );
+    }
+
+    /// A thumb wheel moves the grid sideways.
+    ///
+    /// Untested until now: the code was there, but nothing said it worked, so
+    /// a change to the match arms could have removed it without a failure.
+    #[test]
+    fn the_horizontal_wheel_scrolls_sideways() {
+        let mut sheet = sheet();
+        let (row, col) = (sheet.cursor_row, sheet.cursor_col);
+
+        let right = at(MouseEventKind::ScrollRight, 10, 5);
+        assert!(handle_mouse(&mut sheet, right));
+        assert_eq!(sheet.scroll_col, 1);
+        assert_eq!(sheet.cursor_col, col + 1, "the cursor came along");
+        assert_eq!(sheet.cursor_row, row, "and nothing moved up or down");
+
+        let left = at(MouseEventKind::ScrollLeft, 10, 5);
+        assert!(handle_mouse(&mut sheet, left));
+        assert_eq!(sheet.scroll_col, 0);
+        assert_eq!(sheet.cursor_col, col);
+    }
+
+    /// A sideways notch moves one column, not three.
+    ///
+    /// Columns are ten characters wide and rows are one line tall. Three of
+    /// each would send the view about ten times as far sideways as it goes
+    /// down, which reads as a jump rather than a scroll.
+    #[test]
+    fn a_sideways_notch_travels_less_far_than_a_vertical_one() {
+        let mut scrolled_sideways = sheet();
+        let sideways = at(MouseEventKind::ScrollRight, 10, 5);
+        assert!(handle_mouse(&mut scrolled_sideways, sideways));
+        let columns = scrolled_sideways.scroll_col;
+
+        let mut scrolled_down = sheet();
+        let down = at(MouseEventKind::ScrollDown, 10, 5);
+        assert!(handle_mouse(&mut scrolled_down, down));
+        let rows = scrolled_down.scroll_row;
+
+        assert!(
+            columns < rows,
+            "a column is wider than a row is tall: {columns} columns vs {rows} rows"
+        );
+    }
+
+    /// Holding shift turns the vertical wheel sideways.
+    ///
+    /// This is what a mouse without a thumb wheel has, and what people try
+    /// first because spreadsheets and browsers have always worked this way.
+    #[test]
+    fn shift_turns_the_vertical_wheel_sideways() {
+        let mut sheet = sheet();
+
+        let down = with_shift(MouseEventKind::ScrollDown);
+        assert!(handle_mouse(&mut sheet, down));
+        assert_eq!(sheet.scroll_col, 1, "moved sideways");
+        assert_eq!(sheet.scroll_row, 0, "and not down");
+
+        let up = with_shift(MouseEventKind::ScrollUp);
+        assert!(handle_mouse(&mut sheet, up));
+        assert_eq!(sheet.scroll_col, 0);
+        assert_eq!(sheet.scroll_row, 0);
+    }
+
+    /// Sideways scrolling survives the frame after it, like the vertical case.
+    #[test]
+    fn the_horizontal_wheel_still_has_an_effect_once_the_frame_is_drawn() {
+        let mut sheet = sheet();
+        let area = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        };
+
+        let right = at(MouseEventKind::ScrollRight, 10, 5);
+        assert!(handle_mouse(&mut sheet, right));
+        let scrolled_to = sheet.scroll_col;
+        assert!(scrolled_to > 0, "the wheel moved the view");
+
+        sheet.adjust_scroll(area);
+
+        assert_eq!(
+            sheet.scroll_col, scrolled_to,
+            "drawing the next frame undid the sideways scroll"
+        );
+    }
+
+    #[test]
+    fn the_horizontal_wheel_cannot_scroll_past_the_edges_of_the_sheet() {
+        let mut sheet = sheet();
+        let left = at(MouseEventKind::ScrollLeft, 10, 5);
+        assert!(!handle_mouse(&mut sheet, left), "already at column A");
+        assert_eq!(sheet.scroll_col, 0);
+
+        sheet.scroll_col = sheet.num_cols - 1;
+        let right = at(MouseEventKind::ScrollRight, 10, 5);
+        assert!(!handle_mouse(&mut sheet, right), "already at column Z");
+        assert_eq!(sheet.scroll_col, sheet.num_cols - 1);
+    }
+
+    #[test]
+    fn the_wheel_cannot_scroll_past_the_start_of_the_sheet() {
+        let mut sheet = sheet();
+
+        assert!(!handle_mouse(&mut sheet, at(MouseEventKind::ScrollUp, 10, 5)));
+
+        assert_eq!(sheet.scroll_row, 0);
+    }
+
+    #[test]
+    fn the_wheel_cannot_scroll_past_the_end_of_the_sheet() {
+        let mut sheet = sheet();
+        sheet.scroll_row = sheet.num_rows - 1;
+
+        assert!(!handle_mouse(&mut sheet, at(MouseEventKind::ScrollDown, 10, 5)));
+
+        assert_eq!(sheet.scroll_row, sheet.num_rows - 1);
+    }
+
+    /// A click behind a dialog would change the grid where the user cannot see
+    /// it. Every modal keeps the mouse out.
+    fn assert_modal_swallows_clicks(name: &str, open_modal: impl Fn(&mut Spreadsheet)) {
+        let mut sheet = sheet();
+        open_modal(&mut sheet);
+
+        assert!(
+            !handle_mouse(&mut sheet, click(16, 4)),
+            "{name} let a click through"
+        );
+        assert_eq!(
+            (sheet.cursor_row, sheet.cursor_col),
+            (0, 0),
+            "{name} moved the cursor"
+        );
+    }
+
+    #[test]
+    fn modals_swallow_mouse_input() {
+        assert_modal_swallows_clicks("editing", |s| s.editing = true);
+        assert_modal_swallows_clicks("command mode", |s| s.command_mode = true);
+        assert_modal_swallows_clicks("open dialog", |s| s.open_mode = true);
+        assert_modal_swallows_clicks("save dialog", |s| s.save_mode = true);
+        assert_modal_swallows_clicks("update prompt", |s| s.update_prompt_shown = true);
+    }
+
+    /// Before the first frame there is no geometry, so nothing can be hit.
+    #[test]
+    fn a_click_before_the_first_draw_is_ignored() {
+        let mut sheet = Spreadsheet::new();
+
+        assert!(!handle_mouse(&mut sheet, click(10, 5)));
+    }
+
+    #[test]
+    fn scrolled_views_resolve_clicks_to_the_right_sheet_coordinates() {
+        let mut sheet = sheet();
+        sheet.grid_geometry.scroll_row = 40;
+        sheet.grid_geometry.scroll_col = 6;
+
+        assert!(handle_mouse(&mut sheet, click(16, 4)));
+
+        assert_eq!((sheet.cursor_row, sheet.cursor_col), (42, 7));
     }
 }
