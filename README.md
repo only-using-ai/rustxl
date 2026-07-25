@@ -102,6 +102,10 @@ The binary will be available at `target/release/xl`.
 xl
 
 # Open a file
+xl data.csv
+xl spreadsheet.xlsx
+
+# The --file flag does the same thing
 xl -f data.csv
 xl --file spreadsheet.xlsx
 

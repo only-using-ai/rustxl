@@ -19,16 +19,29 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 #[command(name = "xl")]
 #[command(about = "A terminal-based spreadsheet application")]
 struct Args {
     /// File to open (supports CSV, TSV, and Excel files)
-    #[arg(short, long)]
+    #[arg(value_name = "FILE")]
+    path: Option<String>,
+    /// File to open (supports CSV, TSV, and Excel files)
+    #[arg(short, long, value_name = "FILE", conflicts_with = "path")]
     file: Option<String>,
     /// Print version information and exit
     #[arg(short = 'V', long = "version")]
     version: bool,
+}
+
+impl Args {
+    /// The file to open, whether it was given positionally or through `--file`.
+    ///
+    /// The two are mutually exclusive at the parser level, so at most one of
+    /// them can be set here.
+    fn file_to_open(&self) -> Option<&str> {
+        self.path.as_deref().or(self.file.as_deref())
+    }
 }
 
 /// Reads all data from stdin into a buffer when stdin is piped.
@@ -41,6 +54,52 @@ fn read_piped_stdin() -> io::Result<Option<Vec<u8>>> {
     let mut buffer = Vec::new();
     io::stdin().read_to_end(&mut buffer)?;
     Ok(Some(buffer))
+}
+
+#[cfg(test)]
+mod argument_parsing {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Args, clap::Error> {
+        Args::try_parse_from(args)
+    }
+
+    #[test]
+    fn a_positional_path_selects_the_file_to_open() {
+        let args = parse(&["xl", "data.xlsx"]).expect("a bare path is accepted");
+        assert_eq!(args.file_to_open(), Some("data.xlsx"));
+    }
+
+    #[test]
+    fn the_file_flag_still_works() {
+        let short = parse(&["xl", "-f", "data.csv"]).expect("-f is accepted");
+        assert_eq!(short.file_to_open(), Some("data.csv"));
+
+        let long = parse(&["xl", "--file", "data.csv"]).expect("--file is accepted");
+        assert_eq!(long.file_to_open(), Some("data.csv"));
+    }
+
+    #[test]
+    fn giving_both_forms_is_rejected_with_a_conflict_error() {
+        let error = parse(&["xl", "one.csv", "-f", "two.csv"])
+            .expect_err("the two forms are mutually exclusive");
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn no_argument_means_no_file_to_open() {
+        let args = parse(&["xl"]).expect("running without arguments is allowed");
+        assert_eq!(args.file_to_open(), None);
+    }
+
+    #[test]
+    fn paths_that_look_like_flags_are_still_rejected() {
+        // A stray unknown flag must not be silently swallowed as a filename.
+        let error = parse(&["xl", "--nope"]).expect_err("unknown flags are errors");
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
 }
 
 /// Tests for piped stdin handling
@@ -120,7 +179,7 @@ fn main() -> io::Result<()> {
             eprintln!("Error loading data from stdin: {}", e);
             std::process::exit(1);
         }
-    } else if let Some(ref filepath) = args.file {
+    } else if let Some(filepath) = args.file_to_open() {
         // Load from file if provided
         if let Err(e) = spreadsheet.load_from_file(filepath) {
             eprintln!("Error loading file '{}': {}", filepath, e);
