@@ -102,11 +102,8 @@ pub fn check_for_update() -> Result<Option<UpdateInfo>, String> {
     }
 
     // Find the appropriate asset for this platform
-    let platform_asset = get_platform_asset_name();
-    if platform_asset.is_none() {
-        return Err("No compatible binary available for this platform".to_string());
-    }
-    let platform_asset = platform_asset.unwrap();
+    let platform_asset = get_platform_asset_name()
+        .ok_or_else(|| "No compatible binary available for this platform".to_string())?;
 
     let asset = release
         .assets

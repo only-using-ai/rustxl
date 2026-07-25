@@ -1,5 +1,24 @@
 use crate::spreadsheet::Spreadsheet;
 
+/// Removes one matching pair of surrounding quotes, if the text has them.
+///
+/// Returns `None` when the text is not quoted, so callers keep control over what
+/// an unquoted value should become — some trim it, some pass it through.
+///
+/// Single and double quotes are both accepted, but they must match: `"a'` is not
+/// quoted. Fewer than two characters can never be a quoted string.
+fn strip_matching_quotes(text: &str) -> Option<&str> {
+    let mut chars = text.chars();
+    let first = chars.next()?;
+    let last = chars.next_back()?;
+
+    if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
+        Some(&text[first.len_utf8()..text.len() - last.len_utf8()])
+    } else {
+        None
+    }
+}
+
 impl Spreadsheet {
     pub fn evaluate_cell(&mut self, row: usize, col: usize) -> String {
         let content = self.get_cell(row, col).to_string();
@@ -560,12 +579,8 @@ impl Spreadsheet {
         let arg = arg.trim();
 
         // Check for matching quotes (single or double)
-        if arg.len() >= 2 {
-            let first_char = arg.chars().next().unwrap();
-            let last_char = arg.chars().last().unwrap();
-            if (first_char == '"' && last_char == '"') || (first_char == '\'' && last_char == '\'') {
-                return arg[1..arg.len() - 1].to_string();
-            }
+        if let Some(inner) = strip_matching_quotes(arg) {
+            return inner.to_string();
         }
 
         if arg.contains('(') {
@@ -1000,17 +1015,9 @@ impl Spreadsheet {
         };
 
         // Remove quotes if present
-        let text = if text.len() >= 2 {
-            let first_char = text.chars().next().unwrap();
-            let last_char = text.chars().last().unwrap();
-            if (first_char == '"' && last_char == '"') || (first_char == '\'' && last_char == '\'') {
-                text[1..text.len() - 1].to_string()
-            } else {
-                text
-            }
-        } else {
-            text
-        };
+        let text = strip_matching_quotes(&text)
+            .map(str::to_string)
+            .unwrap_or(text);
 
         let chars: Vec<char> = text.chars().collect();
         let end = num_chars.min(chars.len());
@@ -1033,17 +1040,9 @@ impl Spreadsheet {
         };
 
         // Remove quotes if present
-        let text = if text.len() >= 2 {
-            let first_char = text.chars().next().unwrap();
-            let last_char = text.chars().last().unwrap();
-            if (first_char == '"' && last_char == '"') || (first_char == '\'' && last_char == '\'') {
-                text[1..text.len() - 1].to_string()
-            } else {
-                text
-            }
-        } else {
-            text
-        };
+        let text = strip_matching_quotes(&text)
+            .map(str::to_string)
+            .unwrap_or(text);
 
         let chars: Vec<char> = text.chars().collect();
         let start = if num_chars > chars.len() {
@@ -1075,17 +1074,9 @@ impl Spreadsheet {
         };
 
         // Remove quotes if present
-        let text = if text.len() >= 2 {
-            let first_char = text.chars().next().unwrap();
-            let last_char = text.chars().last().unwrap();
-            if (first_char == '"' && last_char == '"') || (first_char == '\'' && last_char == '\'') {
-                text[1..text.len() - 1].to_string()
-            } else {
-                text
-            }
-        } else {
-            text
-        };
+        let text = strip_matching_quotes(&text)
+            .map(str::to_string)
+            .unwrap_or(text);
 
         let chars: Vec<char> = text.chars().collect();
         if start_num == 0 || start_num > chars.len() {
@@ -1101,17 +1092,9 @@ impl Spreadsheet {
         let text = self.evaluate_arg(args.trim(), current_row, current_col);
 
         // Remove quotes if present
-        let text = if text.len() >= 2 {
-            let first_char = text.chars().next().unwrap();
-            let last_char = text.chars().last().unwrap();
-            if (first_char == '"' && last_char == '"') || (first_char == '\'' && last_char == '\'') {
-                text[1..text.len() - 1].to_string()
-            } else {
-                text
-            }
-        } else {
-            text
-        };
+        let text = strip_matching_quotes(&text)
+            .map(str::to_string)
+            .unwrap_or(text);
 
         format!("{}", text.chars().count())
     }
@@ -1240,17 +1223,7 @@ impl Spreadsheet {
         let criteria = criteria.trim();
 
         // Remove quotes if present
-        let criteria = if criteria.len() >= 2 {
-            let first_char = criteria.chars().next().unwrap();
-            let last_char = criteria.chars().last().unwrap();
-            if (first_char == '"' && last_char == '"') || (first_char == '\'' && last_char == '\'') {
-                &criteria[1..criteria.len() - 1]
-            } else {
-                criteria
-            }
-        } else {
-            criteria
-        };
+        let criteria = strip_matching_quotes(criteria).unwrap_or(criteria);
 
         // Check for comparison operators
         let operators = [">=", "<=", "<>", ">", "<", "="];
@@ -1290,17 +1263,9 @@ impl Spreadsheet {
 
     pub fn evaluate_shell(&mut self, args: &str, start_row: usize, start_col: usize) -> String {
         // Parse the command argument - handle quoted strings (single or double quotes)
-        let command = if args.len() >= 2 {
-            let first_char = args.chars().next().unwrap();
-            let last_char = args.chars().last().unwrap();
-            if (first_char == '"' && last_char == '"') || (first_char == '\'' && last_char == '\'') {
-                args[1..args.len() - 1].to_string()
-            } else {
-                args.trim().to_string()
-            }
-        } else {
-            args.trim().to_string()
-        };
+        let command = strip_matching_quotes(args)
+            .map(str::to_string)
+            .unwrap_or_else(|| args.trim().to_string());
 
         if command.is_empty() {
             return "#ERROR".to_string();
@@ -1530,17 +1495,9 @@ impl Spreadsheet {
         let text = self.evaluate_arg(parts[0].trim(), current_row, current_col);
 
         // Remove quotes if present
-        let text = if text.len() >= 2 {
-            let first_char = text.chars().next().unwrap();
-            let last_char = text.chars().last().unwrap();
-            if (first_char == '"' && last_char == '"') || (first_char == '\'' && last_char == '\'') {
-                text[1..text.len() - 1].to_string()
-            } else {
-                text
-            }
-        } else {
-            text
-        };
+        let text = strip_matching_quotes(&text)
+            .map(str::to_string)
+            .unwrap_or(text);
 
         // TRIM removes leading and trailing spaces, and reduces multiple spaces to single spaces
         let trimmed: String = text
@@ -1560,17 +1517,9 @@ impl Spreadsheet {
         let text = self.evaluate_arg(parts[0].trim(), current_row, current_col);
 
         // Remove quotes if present
-        let text = if text.len() >= 2 {
-            let first_char = text.chars().next().unwrap();
-            let last_char = text.chars().last().unwrap();
-            if (first_char == '"' && last_char == '"') || (first_char == '\'' && last_char == '\'') {
-                text[1..text.len() - 1].to_string()
-            } else {
-                text
-            }
-        } else {
-            text
-        };
+        let text = strip_matching_quotes(&text)
+            .map(str::to_string)
+            .unwrap_or(text);
 
         text.to_uppercase()
     }
@@ -1624,17 +1573,9 @@ impl Spreadsheet {
         let text = self.evaluate_arg(parts[0].trim(), current_row, current_col);
 
         // Remove quotes if present
-        let text = if text.len() >= 2 {
-            let first_char = text.chars().next().unwrap();
-            let last_char = text.chars().last().unwrap();
-            if (first_char == '"' && last_char == '"') || (first_char == '\'' && last_char == '\'') {
-                text[1..text.len() - 1].to_string()
-            } else {
-                text
-            }
-        } else {
-            text
-        };
+        let text = strip_matching_quotes(&text)
+            .map(str::to_string)
+            .unwrap_or(text);
 
         text.to_lowercase()
     }
@@ -1776,17 +1717,9 @@ impl Spreadsheet {
         let text = self.evaluate_arg(parts[0].trim(), current_row, current_col);
 
         // Remove quotes if present
-        let text = if text.len() >= 2 {
-            let first_char = text.chars().next().unwrap();
-            let last_char = text.chars().last().unwrap();
-            if (first_char == '"' && last_char == '"') || (first_char == '\'' && last_char == '\'') {
-                text[1..text.len() - 1].to_string()
-            } else {
-                text
-            }
-        } else {
-            text
-        };
+        let text = strip_matching_quotes(&text)
+            .map(str::to_string)
+            .unwrap_or(text);
 
         // PROPER converts to title case: first letter of each word uppercase, rest lowercase
         let mut result = String::new();
@@ -1797,10 +1730,12 @@ impl Spreadsheet {
                 result.push(c);
                 capitalize_next = true;
             } else if capitalize_next {
-                result.push(c.to_uppercase().next().unwrap());
+                // Case conversion can yield more than one character (ß -> SS),
+                // so extend rather than taking only the first.
+                result.extend(c.to_uppercase());
                 capitalize_next = false;
             } else {
-                result.push(c.to_lowercase().next().unwrap());
+                result.extend(c.to_lowercase());
             }
         }
         
@@ -2582,5 +2517,71 @@ mod tests {
         sheet.set_cell(1, 0, "20".to_string());
         sheet.set_cell(2, 0, "30".to_string());
         assert_eq!(sheet.evaluate_formula("=MEDIAN(A1:A3,40)", 0, 0), "25");
+    }
+}
+
+#[cfg(test)]
+mod quote_stripping {
+    use super::strip_matching_quotes;
+
+    #[test]
+    fn matching_pairs_are_removed() {
+        assert_eq!(strip_matching_quotes("\"hello\""), Some("hello"));
+        assert_eq!(strip_matching_quotes("'hello'"), Some("hello"));
+        assert_eq!(strip_matching_quotes("\"\""), Some(""));
+    }
+
+    #[test]
+    fn unquoted_and_mismatched_text_is_left_alone() {
+        assert_eq!(strip_matching_quotes("hello"), None);
+        assert_eq!(strip_matching_quotes("\"hello'"), None);
+        assert_eq!(strip_matching_quotes("'hello\""), None);
+        assert_eq!(strip_matching_quotes("\"hello"), None);
+        assert_eq!(strip_matching_quotes("hello\""), None);
+    }
+
+    #[test]
+    fn text_shorter_than_a_quoted_pair_is_left_alone() {
+        assert_eq!(strip_matching_quotes(""), None);
+        assert_eq!(strip_matching_quotes("\""), None);
+        assert_eq!(strip_matching_quotes("a"), None);
+    }
+
+    #[test]
+    fn quotes_are_only_stripped_from_the_ends() {
+        assert_eq!(strip_matching_quotes("\"a\"b\""), Some("a\"b"));
+        assert_eq!(strip_matching_quotes("a\"b"), None);
+    }
+
+    /// Multi-byte content must not be sliced through a character boundary.
+    #[test]
+    fn multi_byte_content_survives_stripping() {
+        assert_eq!(strip_matching_quotes("\"héllo\""), Some("héllo"));
+        assert_eq!(strip_matching_quotes("\"日本語\""), Some("日本語"));
+        // A single multi-byte character is two bytes but one char, so it cannot
+        // be a quoted string.
+        assert_eq!(strip_matching_quotes("é"), None);
+    }
+}
+
+#[cfg(test)]
+mod case_conversion {
+    use crate::spreadsheet::Spreadsheet;
+
+    /// `char::to_uppercase` can yield several characters, and all of them belong
+    /// in the result. Taking only the first turned "straße" into "Strae".
+    #[test]
+    fn proper_keeps_every_character_of_a_multi_character_uppercase() {
+        let mut sheet = Spreadsheet::new();
+        assert_eq!(sheet.evaluate_formula("=PROPER(\"ßeta\")", 0, 0), "SSeta");
+    }
+
+    #[test]
+    fn proper_title_cases_each_word() {
+        let mut sheet = Spreadsheet::new();
+        assert_eq!(
+            sheet.evaluate_formula("=PROPER(\"hello WORLD\")", 0, 0),
+            "Hello World"
+        );
     }
 }

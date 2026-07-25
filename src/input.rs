@@ -370,11 +370,19 @@ fn handle_visual_main(spreadsheet: &mut Spreadsheet, code: KeyCode) {
     }
 }
 
+/// Maps a typed character to an index into `COLOR_PALETTE`.
+///
+/// Returns `None` for anything that is not a digit naming an existing palette
+/// entry, so callers can ignore the key instead of reaching past the palette.
+fn palette_index(c: char) -> Option<usize> {
+    let index = c.to_digit(10)? as usize;
+    (index < COLOR_PALETTE.len()).then_some(index)
+}
+
 fn handle_visual_text_color(spreadsheet: &mut Spreadsheet, code: KeyCode) {
     match code {
-        KeyCode::Char(c) if c.is_ascii_digit() => {
-            let idx = c.to_digit(10).unwrap() as usize;
-            if idx < COLOR_PALETTE.len() {
+        KeyCode::Char(c) => {
+            if let Some(idx) = palette_index(c) {
                 let color = COLOR_PALETTE[idx].0;
                 spreadsheet.apply_style_to_selection(Some(color), None);
                 spreadsheet.visual_sub_mode = VisualSubMode::Main;
@@ -387,9 +395,8 @@ fn handle_visual_text_color(spreadsheet: &mut Spreadsheet, code: KeyCode) {
 
 fn handle_visual_bg_color(spreadsheet: &mut Spreadsheet, code: KeyCode) {
     match code {
-        KeyCode::Char(c) if c.is_ascii_digit() => {
-            let idx = c.to_digit(10).unwrap() as usize;
-            if idx < COLOR_PALETTE.len() {
+        KeyCode::Char(c) => {
+            if let Some(idx) = palette_index(c) {
                 let color = COLOR_PALETTE[idx].0;
                 spreadsheet.apply_style_to_selection(None, Some(color));
                 spreadsheet.visual_sub_mode = VisualSubMode::Main;
@@ -838,6 +845,38 @@ fn handle_command_mode(spreadsheet: &mut Spreadsheet, code: KeyCode) -> bool {
         _ => {}
     }
     false
+}
+
+#[cfg(test)]
+mod palette_selection {
+    use super::*;
+
+    #[test]
+    fn digits_name_the_palette_entry_with_that_index() {
+        assert_eq!(palette_index('0'), Some(0));
+        assert_eq!(palette_index('9'), Some(9));
+    }
+
+    #[test]
+    fn every_returned_index_is_inside_the_palette() {
+        for c in '0'..='9' {
+            if let Some(index) = palette_index(c) {
+                assert!(
+                    index < COLOR_PALETTE.len(),
+                    "{c} produced out-of-range index {index}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn characters_that_do_not_name_a_colour_are_ignored() {
+        assert_eq!(palette_index('a'), None);
+        assert_eq!(palette_index(' '), None);
+        assert_eq!(palette_index('é'), None);
+        // Non-ASCII digits are not palette selectors either.
+        assert_eq!(palette_index('٣'), None);
+    }
 }
 
 #[cfg(test)]
