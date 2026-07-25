@@ -547,6 +547,13 @@ fn render_grid(
         widths.push(Constraint::Length(spreadsheet.get_col_width(col)));
     }
 
+    // The sheet name rides on the grid's own border, so a workbook costs no
+    // vertical space compared with a single-sheet file.
+    let sheet_title = Line::from(Span::styled(
+        format!(" {} ", spreadsheet.sheet_indicator()),
+        Style::default().fg(header_fg).bg(header_bg),
+    ));
+
     let table = Table::new(rows, &widths)
         .header(header)
         .column_spacing(0)
@@ -554,7 +561,8 @@ fn render_grid(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(grid_color))
-                .style(Style::default().bg(cell_bg)),
+                .style(Style::default().bg(cell_bg))
+                .title_top(sheet_title.left_aligned()),
         );
 
     f.render_widget(table, area);

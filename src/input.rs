@@ -585,6 +585,16 @@ fn handle_ready_mode(
             return false;
         }
         // PageDown/PageUp for jumping to last/first row (alternative to Cmd+Down/Up)
+        // Sheet navigation, matching Excel. These must come before the
+        // unmodified Page keys below, which would otherwise swallow them.
+        KeyCode::PageDown if ctrl_or_cmd => {
+            spreadsheet.next_sheet();
+            return false;
+        }
+        KeyCode::PageUp if ctrl_or_cmd => {
+            spreadsheet.previous_sheet();
+            return false;
+        }
         KeyCode::PageDown => {
             spreadsheet.jump_to_last_row();
             return false;
@@ -872,5 +882,76 @@ mod tests {
 
         assert!(!sheet.editing);
         assert_eq!(sheet.get_cell(0, 0), "test");
+    }
+}
+
+#[cfg(test)]
+mod sheet_navigation_keys {
+    use super::*;
+    use crate::sheet::Sheet;
+
+    fn workbook() -> Spreadsheet {
+        let mut sheet = Spreadsheet::new();
+        sheet.replace_sheets(vec![Sheet::new("Alpha"), Sheet::new("Beta")]);
+        sheet
+    }
+
+    #[test]
+    fn ctrl_page_keys_move_between_sheets() {
+        let mut sheet = workbook();
+
+        handle_ready_mode(&mut sheet, KeyCode::PageDown, KeyModifiers::CONTROL);
+        assert_eq!(sheet.active_sheet_name(), "Beta");
+
+        handle_ready_mode(&mut sheet, KeyCode::PageUp, KeyModifiers::CONTROL);
+        assert_eq!(sheet.active_sheet_name(), "Alpha");
+    }
+
+    /// The plain Page keys still jump within the sheet, as they always have.
+    ///
+    /// The sheet arms are matched first, so this is the check that they did not
+    /// swallow the unmodified keys.
+    #[test]
+    fn unmodified_page_keys_still_jump_inside_the_sheet() {
+        let mut sheet = workbook();
+        // The Page keys jump between the populated rows of the current column,
+        // so the column needs a top and a bottom to travel between.
+        sheet.set_cell(5, 0, "top".to_string());
+        sheet.set_cell(20, 0, "bottom".to_string());
+        sheet.cursor_row = 10;
+
+        handle_ready_mode(&mut sheet, KeyCode::PageDown, KeyModifiers::empty());
+        assert_eq!(sheet.active_sheet_name(), "Alpha", "still on the same sheet");
+        assert_eq!(sheet.cursor_row, 20, "moved to the last populated row");
+
+        handle_ready_mode(&mut sheet, KeyCode::PageUp, KeyModifiers::empty());
+        assert_eq!(sheet.active_sheet_name(), "Alpha");
+        assert_eq!(sheet.cursor_row, 5, "moved to the first populated row");
+    }
+
+    /// Typing a letter edits the cell; it must not be read as a sheet command.
+    ///
+    /// `handle_ready_mode` ends in a `KeyCode::Char(c)` catch-all that starts
+    /// editing, which is why a two-key sequence like vim's `gt` cannot be used
+    /// for sheet navigation here.
+    #[test]
+    fn letters_still_start_editing_rather_than_switching_sheets() {
+        let mut sheet = workbook();
+
+        handle_ready_mode(&mut sheet, KeyCode::Char('g'), KeyModifiers::empty());
+
+        assert_eq!(sheet.active_sheet_name(), "Alpha");
+        assert!(sheet.editing, "a letter begins a cell edit");
+    }
+
+    /// Tab keeps opening Visual mode, which is why it is not the sheet key.
+    #[test]
+    fn tab_still_opens_visual_mode() {
+        let mut sheet = workbook();
+
+        handle_ready_mode(&mut sheet, KeyCode::Tab, KeyModifiers::empty());
+
+        assert!(sheet.visual_mode);
+        assert_eq!(sheet.active_sheet_name(), "Alpha");
     }
 }

@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use ratatui::layout::Rect;
 
 use crate::constants::{DEFAULT_COLS, DEFAULT_ROWS};
+use crate::sheet::Sheet;
 use crate::types::{CellStyle, RowColumnSelectMode, SaveFormat, VisualSubMode};
 use crate::update::UpdateInfo;
 
@@ -81,6 +82,15 @@ pub struct Spreadsheet {
     pub formula_suggestions: Vec<String>,
     pub formula_suggestion_index: usize,
     pub formula_prefix: String,
+    // Workbook
+    /// Every sheet in the workbook, including the one being edited.
+    ///
+    /// The fields above are a working copy of `sheets[active_sheet]`: editing
+    /// touches them directly, and the copy is written back when the user
+    /// switches sheets. Read `sheets` only through the methods that park the
+    /// working copy first, or the active entry will be stale.
+    pub sheets: Vec<Sheet>,
+    pub active_sheet: usize,
 }
 
 impl Spreadsheet {
@@ -135,7 +145,156 @@ impl Spreadsheet {
             formula_suggestions: Vec::new(),
             formula_suggestion_index: 0,
             formula_prefix: String::new(),
+            sheets: vec![Sheet::default()],
+            active_sheet: 0,
         }
+    }
+
+    /// How many sheets the workbook holds. Never zero.
+    pub fn sheet_count(&self) -> usize {
+        self.sheets.len()
+    }
+
+    /// The name of the sheet currently being edited.
+    pub fn active_sheet_name(&self) -> &str {
+        self.sheets
+            .get(self.active_sheet)
+            .map(|sheet| sheet.name.as_str())
+            .unwrap_or(crate::sheet::DEFAULT_SHEET_NAME)
+    }
+
+    /// Writes the working copy back into `sheets[active_sheet]`.
+    ///
+    /// Copies rather than moves, so the collection is always complete: every
+    /// entry holds a usable sheet, and only the active one can lag behind the
+    /// edits made since it was checked out. Parking closes that gap.
+    fn park_active_sheet(&mut self) {
+        let (cells, cell_styles, col_widths, row_heights) = (
+            self.cells.clone(),
+            self.cell_styles.clone(),
+            self.col_widths.clone(),
+            self.row_heights.clone(),
+        );
+        let (num_rows, num_cols) = (self.num_rows, self.num_cols);
+        let (cursor_row, cursor_col) = (self.cursor_row, self.cursor_col);
+        let (scroll_row, scroll_col) = (self.scroll_row, self.scroll_col);
+
+        let Some(sheet) = self.sheets.get_mut(self.active_sheet) else {
+            return;
+        };
+        sheet.cells = cells;
+        sheet.cell_styles = cell_styles;
+        sheet.col_widths = col_widths;
+        sheet.row_heights = row_heights;
+        sheet.num_rows = num_rows;
+        sheet.num_cols = num_cols;
+        sheet.cursor_row = cursor_row;
+        sheet.cursor_col = cursor_col;
+        sheet.scroll_row = scroll_row;
+        sheet.scroll_col = scroll_col;
+    }
+
+    /// Loads `sheets[index]` into the working copy.
+    ///
+    /// The caller is responsible for having parked the previous sheet first.
+    fn checkout_sheet(&mut self, index: usize) {
+        let Some(sheet) = self.sheets.get(index) else {
+            return;
+        };
+        self.cells = sheet.cells.clone();
+        self.cell_styles = sheet.cell_styles.clone();
+        self.col_widths = sheet.col_widths.clone();
+        self.row_heights = sheet.row_heights.clone();
+        self.num_rows = sheet.num_rows;
+        self.num_cols = sheet.num_cols;
+        self.cursor_row = sheet.cursor_row;
+        self.cursor_col = sheet.cursor_col;
+        self.scroll_row = sheet.scroll_row;
+        self.scroll_col = sheet.scroll_col;
+        self.active_sheet = index;
+    }
+
+    /// Switches to another sheet, keeping the current one's edits and position.
+    ///
+    /// Returns `false` if the index does not name a sheet, or if it is already
+    /// the active one, in which case nothing changes.
+    pub fn activate_sheet(&mut self, index: usize) -> bool {
+        if index >= self.sheets.len() || index == self.active_sheet {
+            return false;
+        }
+
+        self.park_active_sheet();
+        self.checkout_sheet(index);
+        self.clear_selection();
+        true
+    }
+
+    /// Moves to the next sheet, wrapping round to the first one at the end.
+    ///
+    /// Wrapping keeps the key useful on the last sheet: in a workbook of two or
+    /// three sheets, cycling is what the user is doing anyway.
+    pub fn next_sheet(&mut self) -> bool {
+        if self.sheets.len() < 2 {
+            return false;
+        }
+        let next = (self.active_sheet + 1) % self.sheets.len();
+        self.activate_sheet(next)
+    }
+
+    /// Moves to the previous sheet, wrapping round to the last one at the start.
+    pub fn previous_sheet(&mut self) -> bool {
+        if self.sheets.len() < 2 {
+            return false;
+        }
+        let previous = if self.active_sheet == 0 {
+            self.sheets.len() - 1
+        } else {
+            self.active_sheet - 1
+        };
+        self.activate_sheet(previous)
+    }
+
+    /// How the active sheet should be labelled on screen.
+    ///
+    /// A workbook with a single sheet says just its name — the position would be
+    /// noise. With more than one, the position is what the user needs to know.
+    pub fn sheet_indicator(&self) -> String {
+        let count = self.sheet_count();
+        if count < 2 {
+            return self.active_sheet_name().to_string();
+        }
+        format!(
+            "{} ({}/{})",
+            self.active_sheet_name(),
+            self.active_sheet + 1,
+            count
+        )
+    }
+
+    /// Makes whatever is in the grid the workbook's only sheet.
+    ///
+    /// CSV, TSV and piped input have no notion of sheets, so they load straight
+    /// into the grid. Without this the sheets of a workbook opened earlier would
+    /// stay behind, and switching sheets would show a file that is no longer
+    /// open.
+    fn adopt_grid_as_only_sheet(&mut self, name: &str) {
+        self.sheets = vec![Sheet::new(name)];
+        self.active_sheet = 0;
+        self.park_active_sheet();
+    }
+
+    /// Replaces the workbook with `sheets`, showing the first one.
+    ///
+    /// Used by the loaders. An empty list is ignored: a workbook always has at
+    /// least one sheet.
+    pub fn replace_sheets(&mut self, sheets: Vec<Sheet>) {
+        if sheets.is_empty() {
+            return;
+        }
+
+        self.sheets = sheets;
+        self.active_sheet = 0;
+        self.checkout_sheet(0);
     }
 
     pub fn enter_command_mode(&mut self) {
@@ -1189,6 +1348,7 @@ impl Spreadsheet {
         let (max_row, max_col) = self.get_data_bounds();
         self.num_rows = (max_row + 1).max(DEFAULT_ROWS);
         self.num_cols = (max_col + 1).max(DEFAULT_COLS);
+        self.adopt_grid_as_only_sheet(crate::sheet::DEFAULT_SHEET_NAME);
 
         Ok(())
     }
@@ -1211,47 +1371,57 @@ impl Spreadsheet {
             ));
         }
 
-        // Read the first worksheet
-        let range = workbook
-            .worksheet_range(&sheet_names[0])
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        // Read every worksheet. A workbook that only surrendered its first
+        // sheet would lose the rest of the document the moment it was saved.
+        let mut sheets = Vec::with_capacity(sheet_names.len());
+        for name in &sheet_names {
+            let range = workbook
+                .worksheet_range(name)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
 
-        self.cells.clear();
-
-        for (row_idx, row) in range.rows().enumerate() {
-            for (col_idx, cell) in row.iter().enumerate() {
-                let value = match cell {
-                    Data::Empty => continue,
-                    Data::String(s) => s.clone(),
-                    Data::Float(f) => {
-                        // Format floats without unnecessary decimals
-                        if f.fract() == 0.0 {
-                            format!("{:.0}", f)
-                        } else {
-                            f.to_string()
+            let mut sheet = Sheet::new(name.clone());
+            for (row_idx, row) in range.rows().enumerate() {
+                for (col_idx, cell) in row.iter().enumerate() {
+                    let value = match cell {
+                        Data::Empty => continue,
+                        Data::String(s) => s.clone(),
+                        Data::Float(f) => {
+                            // Format floats without unnecessary decimals
+                            if f.fract() == 0.0 {
+                                format!("{:.0}", f)
+                            } else {
+                                f.to_string()
+                            }
                         }
-                    }
-                    Data::Int(i) => i.to_string(),
-                    Data::Bool(b) => b.to_string(),
-                    Data::Error(e) => format!("#ERROR: {:?}", e),
-                    Data::DateTime(dt) => {
-                        // Format datetime as string
-                        format!("{}", dt)
-                    }
-                    Data::DateTimeIso(s) => s.clone(),
-                    Data::DurationIso(s) => s.clone(),
-                };
+                        Data::Int(i) => i.to_string(),
+                        Data::Bool(b) => b.to_string(),
+                        Data::Error(e) => format!("#ERROR: {:?}", e),
+                        Data::DateTime(dt) => {
+                            // Format datetime as string
+                            format!("{}", dt)
+                        }
+                        Data::DateTimeIso(s) => s.clone(),
+                        Data::DurationIso(s) => s.clone(),
+                    };
 
-                if !value.is_empty() {
-                    self.set_cell(row_idx, col_idx, value);
+                    if !value.is_empty() {
+                        sheet.cells.insert((row_idx, col_idx), value);
+                    }
                 }
             }
+
+            // Size each sheet to its own contents.
+            let (max_row, max_col) = sheet
+                .cells
+                .keys()
+                .fold((0, 0), |(r, c), &(row, col)| (r.max(row), c.max(col)));
+            sheet.num_rows = (max_row + 1).max(DEFAULT_ROWS);
+            sheet.num_cols = (max_col + 1).max(DEFAULT_COLS);
+
+            sheets.push(sheet);
         }
 
-        // Update dimensions based on loaded data
-        let (max_row, max_col) = self.get_data_bounds();
-        self.num_rows = (max_row + 1).max(DEFAULT_ROWS);
-        self.num_cols = (max_col + 1).max(DEFAULT_COLS);
+        self.replace_sheets(sheets);
 
         Ok(())
     }
@@ -1289,6 +1459,7 @@ impl Spreadsheet {
         let (max_row, max_col) = self.get_data_bounds();
         self.num_rows = (max_row + 1).max(DEFAULT_ROWS);
         self.num_cols = (max_col + 1).max(DEFAULT_COLS);
+        self.adopt_grid_as_only_sheet(crate::sheet::DEFAULT_SHEET_NAME);
         
         Ok(())
     }
@@ -1442,5 +1613,386 @@ drwxr-xr-x  3 user group  96 Jan 23 14:20 .git
         assert_eq!(sheet.get_cell(0, 1), "wörld");
         assert_eq!(sheet.get_cell(1, 0), "日本語");
         assert_eq!(sheet.get_cell(1, 1), "テスト");
+    }
+}
+
+/// Characterization tests for workbook loading.
+///
+/// These tests pin down what `load_from_file` does *today* so that later changes
+/// to the loader are deliberate rather than accidental. They are deliberately
+/// descriptive: where current behaviour loses data, the test records the loss
+/// instead of asserting the behaviour we would prefer.
+///
+/// Fixture: `tests/fixtures/three_sheets.xlsx` (see `tests/fixtures/README.md`).
+/// Three worksheets, formulas with cached results, a boolean, a date and a float.
+#[cfg(test)]
+mod workbook_loading_characterization {
+    use super::*;
+
+    fn fixture(name: &str) -> String {
+        format!("{}/tests/fixtures/{}", env!("CARGO_MANIFEST_DIR"), name)
+    }
+
+    /// Every worksheet is loaded, and the first one is the one on screen.
+    ///
+    /// This test used to record the opposite: `load_excel` read all the sheet
+    /// names and then kept only `sheet_names[0]`, so a three-sheet workbook was
+    /// silently reduced to one and saving it discarded two thirds of the
+    /// document. The loader now keeps them all.
+    #[test]
+    fn loading_a_multi_sheet_workbook_keeps_every_sheet() {
+        let mut sheet = Spreadsheet::new();
+        sheet
+            .load_from_file(&fixture("three_sheets.xlsx"))
+            .expect("fixture loads");
+
+        assert_eq!(sheet.sheet_count(), 3);
+        assert_eq!(
+            {
+                sheet.park_active_sheet();
+                sheet.sheets.iter()
+            }
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Alpha", "Beta", "Gamma"],
+            "sheets keep their workbook order and names"
+        );
+
+        // Sheet "Alpha" (the first) is the one being edited.
+        assert_eq!(sheet.active_sheet_name(), "Alpha");
+        assert_eq!(sheet.get_cell(0, 0), "Name");
+        assert_eq!(sheet.get_cell(0, 1), "Qty");
+        assert_eq!(sheet.get_cell(1, 0), "widget");
+        assert_eq!(sheet.get_cell(2, 0), "gadget");
+
+        // The other sheets are loaded but not on screen.
+        let on_screen: Vec<&str> = sheet.cells.values().map(String::as_str).collect();
+        assert!(
+            !on_screen.contains(&"flag"),
+            "only the active sheet belongs in the grid: {on_screen:?}"
+        );
+    }
+
+    /// The sheets that are not on screen still carry their own contents.
+    #[test]
+    fn the_sheets_behind_the_active_one_hold_their_own_data() {
+        let mut sheet = Spreadsheet::new();
+        sheet
+            .load_from_file(&fixture("three_sheets.xlsx"))
+            .expect("fixture loads");
+
+        assert!(sheet.activate_sheet(1), "Beta exists");
+        assert_eq!(sheet.active_sheet_name(), "Beta");
+        assert_eq!(sheet.get_cell(0, 0), "flag");
+        assert_eq!(sheet.get_cell(0, 1), "when");
+
+        assert!(sheet.activate_sheet(2), "Gamma exists");
+        assert_eq!(sheet.active_sheet_name(), "Gamma");
+        assert_eq!(sheet.get_cell(0, 0), "cross");
+    }
+
+    /// Each sheet is sized to its own contents, not to the largest one.
+    #[test]
+    fn every_sheet_is_sized_independently() {
+        let mut sheet = Spreadsheet::new();
+        sheet
+            .load_from_file(&fixture("three_sheets.xlsx"))
+            .expect("fixture loads");
+
+        sheet.park_active_sheet();
+        for loaded in &sheet.sheets {
+            assert!(
+                loaded.num_rows >= DEFAULT_ROWS && loaded.num_cols >= DEFAULT_COLS,
+                "sheet {} fell below the default size",
+                loaded.name
+            );
+        }
+    }
+
+    /// Numbers arrive as their cached display text, not as typed values.
+    ///
+    /// Integral floats lose the decimal point (`10.0` becomes `"10"`), which is
+    /// what the grid stores and what a later CSV save writes out.
+    #[test]
+    fn integral_numbers_are_stored_without_a_decimal_point() {
+        let mut sheet = Spreadsheet::new();
+        sheet
+            .load_from_file(&fixture("three_sheets.xlsx"))
+            .expect("fixture loads");
+
+        assert_eq!(sheet.get_cell(1, 1), "10");
+        assert_eq!(sheet.get_cell(2, 1), "20");
+    }
+
+    /// Formula cells contribute their cached result, never the formula text.
+    ///
+    /// `Alpha!C2` holds `=SUM(B2:B3)` with a cached value of 30. The loader sees
+    /// only the cached number, so the formula itself is not recoverable from the
+    /// grid — editing and saving the file would replace it with a constant.
+    #[test]
+    fn formula_cells_load_as_their_cached_result() {
+        let mut sheet = Spreadsheet::new();
+        sheet
+            .load_from_file(&fixture("three_sheets.xlsx"))
+            .expect("fixture loads");
+
+        assert_eq!(sheet.get_cell(1, 2), "30");
+    }
+
+    /// Dimensions grow to fit the data but never shrink below the defaults.
+    #[test]
+    fn dimensions_are_at_least_the_defaults_after_loading() {
+        let mut sheet = Spreadsheet::new();
+        sheet
+            .load_from_file(&fixture("three_sheets.xlsx"))
+            .expect("fixture loads");
+
+        assert!(sheet.num_rows >= DEFAULT_ROWS);
+        assert!(sheet.num_cols >= DEFAULT_COLS);
+    }
+
+    /// A sheetless format replaces the whole workbook, not just the grid.
+    ///
+    /// Opening a workbook and then a CSV used to leave the workbook's other
+    /// sheets in place, so switching sheets showed data from a file that was no
+    /// longer open.
+    #[test]
+    fn loading_a_csv_leaves_the_workbook_with_one_sheet() {
+        let mut sheet = Spreadsheet::new();
+        sheet
+            .load_from_file(&fixture("three_sheets.xlsx"))
+            .expect("fixture loads");
+        assert_eq!(sheet.sheet_count(), 3, "workbook is open");
+
+        let csv = std::env::temp_dir().join(format!(
+            "xl-single-sheet-{}.csv",
+            std::process::id()
+        ));
+        std::fs::write(&csv, "a,b\n1,2\n").expect("temp csv is writable");
+        sheet
+            .load_from_file(&csv.to_string_lossy())
+            .expect("csv loads");
+        let _ = std::fs::remove_file(&csv);
+
+        assert_eq!(sheet.sheet_count(), 1);
+        assert_eq!(sheet.active_sheet, 0);
+        assert_eq!(sheet.get_cell(0, 0), "a");
+    }
+
+    /// Loading replaces the previous contents rather than merging into them.
+    #[test]
+    fn loading_clears_any_previously_held_cells() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(50, 20, "stale".to_string());
+
+        sheet
+            .load_from_file(&fixture("three_sheets.xlsx"))
+            .expect("fixture loads");
+
+        assert_eq!(sheet.get_cell(50, 20), "");
+    }
+
+    /// An unknown extension is rejected before any file access happens.
+    #[test]
+    fn unsupported_extensions_are_rejected() {
+        let mut sheet = Spreadsheet::new();
+        let err = sheet
+            .load_from_file("/nonexistent/data.ods")
+            .expect_err("ods is not supported");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("Unsupported file format"));
+    }
+}
+
+#[cfg(test)]
+mod workbook_sheets {
+    use super::*;
+
+    fn named(name: &str) -> Sheet {
+        Sheet::new(name)
+    }
+
+    #[test]
+    fn a_new_workbook_holds_one_sheet() {
+        let sheet = Spreadsheet::new();
+
+        assert_eq!(sheet.sheet_count(), 1);
+        assert_eq!(sheet.active_sheet, 0);
+        assert_eq!(sheet.active_sheet_name(), crate::sheet::DEFAULT_SHEET_NAME);
+    }
+
+    #[test]
+    fn switching_to_the_current_or_a_missing_sheet_changes_nothing() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "kept".to_string());
+
+        assert!(!sheet.activate_sheet(0), "already on sheet 0");
+        assert!(!sheet.activate_sheet(7), "sheet 7 does not exist");
+
+        assert_eq!(sheet.get_cell(0, 0), "kept");
+        assert_eq!(sheet.active_sheet, 0);
+    }
+
+    #[test]
+    fn replacing_the_sheets_shows_the_first_one() {
+        let mut sheet = Spreadsheet::new();
+        let mut alpha = named("Alpha");
+        alpha.cells.insert((0, 0), "first".to_string());
+        let mut beta = named("Beta");
+        beta.cells.insert((0, 0), "second".to_string());
+
+        sheet.replace_sheets(vec![alpha, beta]);
+
+        assert_eq!(sheet.sheet_count(), 2);
+        assert_eq!(sheet.active_sheet_name(), "Alpha");
+        assert_eq!(sheet.get_cell(0, 0), "first");
+    }
+
+    #[test]
+    fn an_empty_replacement_is_ignored_because_a_workbook_always_has_a_sheet() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "kept".to_string());
+
+        sheet.replace_sheets(Vec::new());
+
+        assert_eq!(sheet.sheet_count(), 1);
+        assert_eq!(sheet.get_cell(0, 0), "kept");
+    }
+
+    #[test]
+    fn edits_survive_a_trip_to_another_sheet_and_back() {
+        let mut sheet = Spreadsheet::new();
+        sheet.replace_sheets(vec![named("Alpha"), named("Beta")]);
+
+        sheet.set_cell(1, 1, "written on Alpha".to_string());
+        assert!(sheet.activate_sheet(1));
+        assert_eq!(sheet.get_cell(1, 1), "", "Beta starts empty");
+
+        sheet.set_cell(2, 2, "written on Beta".to_string());
+        assert!(sheet.activate_sheet(0));
+
+        assert_eq!(sheet.get_cell(1, 1), "written on Alpha");
+        assert_eq!(sheet.get_cell(2, 2), "", "Beta's edit stayed on Beta");
+    }
+
+    #[test]
+    fn each_sheet_remembers_where_the_cursor_was() {
+        let mut sheet = Spreadsheet::new();
+        sheet.replace_sheets(vec![named("Alpha"), named("Beta")]);
+
+        sheet.cursor_row = 4;
+        sheet.cursor_col = 2;
+        sheet.scroll_row = 3;
+
+        assert!(sheet.activate_sheet(1));
+        assert_eq!(
+            (sheet.cursor_row, sheet.cursor_col, sheet.scroll_row),
+            (0, 0, 0),
+            "a freshly visited sheet starts at A1"
+        );
+
+        sheet.cursor_row = 9;
+        assert!(sheet.activate_sheet(0));
+
+        assert_eq!((sheet.cursor_row, sheet.cursor_col), (4, 2));
+        assert_eq!(sheet.scroll_row, 3);
+
+        assert!(sheet.activate_sheet(1));
+        assert_eq!(sheet.cursor_row, 9, "Beta kept its own cursor");
+    }
+
+    #[test]
+    fn the_sheet_collection_includes_edits_that_have_not_been_switched_away_from() {
+        let mut sheet = Spreadsheet::new();
+        sheet.replace_sheets(vec![named("Alpha"), named("Beta")]);
+        sheet.set_cell(0, 0, "unsaved".to_string());
+
+        sheet.park_active_sheet();
+        let sheets = &sheet.sheets;
+
+        assert_eq!(sheets.len(), 2);
+        assert_eq!(
+            sheets[0].cells.get(&(0, 0)).map(String::as_str),
+            Some("unsaved"),
+            "the active sheet must not be stale when the collection is read"
+        );
+    }
+
+    #[test]
+    fn reading_the_collection_leaves_the_grid_usable() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "before".to_string());
+
+        sheet.park_active_sheet();
+
+        assert_eq!(sheet.get_cell(0, 0), "before");
+        sheet.set_cell(0, 1, "after".to_string());
+        assert_eq!(sheet.get_cell(0, 1), "after");
+    }
+
+    #[test]
+    fn switching_sheets_drops_a_selection_that_belonged_to_the_old_sheet() {
+        let mut sheet = Spreadsheet::new();
+        sheet.replace_sheets(vec![named("Alpha"), named("Beta")]);
+        sheet.selection_anchor = Some((0, 0));
+
+        assert!(sheet.activate_sheet(1));
+
+        assert_eq!(sheet.selection_anchor, None);
+    }
+}
+
+#[cfg(test)]
+mod sheet_navigation {
+    use super::*;
+    use crate::sheet::Sheet;
+
+    fn workbook(names: &[&str]) -> Spreadsheet {
+        let mut sheet = Spreadsheet::new();
+        sheet.replace_sheets(names.iter().map(|n| Sheet::new(*n)).collect());
+        sheet
+    }
+
+    #[test]
+    fn moving_forward_wraps_round_to_the_first_sheet() {
+        let mut sheet = workbook(&["Alpha", "Beta", "Gamma"]);
+
+        assert!(sheet.next_sheet());
+        assert_eq!(sheet.active_sheet_name(), "Beta");
+        assert!(sheet.next_sheet());
+        assert_eq!(sheet.active_sheet_name(), "Gamma");
+        assert!(sheet.next_sheet());
+        assert_eq!(sheet.active_sheet_name(), "Alpha", "wrapped round");
+    }
+
+    #[test]
+    fn moving_backward_wraps_round_to_the_last_sheet() {
+        let mut sheet = workbook(&["Alpha", "Beta", "Gamma"]);
+
+        assert!(sheet.previous_sheet());
+        assert_eq!(sheet.active_sheet_name(), "Gamma", "wrapped round");
+        assert!(sheet.previous_sheet());
+        assert_eq!(sheet.active_sheet_name(), "Beta");
+    }
+
+    #[test]
+    fn navigation_does_nothing_in_a_single_sheet_workbook() {
+        let mut sheet = Spreadsheet::new();
+
+        assert!(!sheet.next_sheet());
+        assert!(!sheet.previous_sheet());
+        assert_eq!(sheet.active_sheet, 0);
+    }
+
+    #[test]
+    fn the_indicator_shows_the_position_only_when_there_is_more_than_one_sheet() {
+        let single = Spreadsheet::new();
+        assert_eq!(single.sheet_indicator(), crate::sheet::DEFAULT_SHEET_NAME);
+
+        let mut many = workbook(&["Alpha", "Beta", "Gamma"]);
+        assert_eq!(many.sheet_indicator(), "Alpha (1/3)");
+        many.next_sheet();
+        assert_eq!(many.sheet_indicator(), "Beta (2/3)");
     }
 }
