@@ -1444,3 +1444,119 @@ drwxr-xr-x  3 user group  96 Jan 23 14:20 .git
         assert_eq!(sheet.get_cell(1, 1), "テスト");
     }
 }
+
+/// Characterization tests for workbook loading.
+///
+/// These tests pin down what `load_from_file` does *today* so that later changes
+/// to the loader are deliberate rather than accidental. They are deliberately
+/// descriptive: where current behaviour loses data, the test records the loss
+/// instead of asserting the behaviour we would prefer.
+///
+/// Fixture: `tests/fixtures/three_sheets.xlsx` (see `tests/fixtures/README.md`).
+/// Three worksheets, formulas with cached results, a boolean, a date and a float.
+#[cfg(test)]
+mod workbook_loading_characterization {
+    use super::*;
+
+    fn fixture(name: &str) -> String {
+        format!("{}/tests/fixtures/{}", env!("CARGO_MANIFEST_DIR"), name)
+    }
+
+    /// Only the first worksheet reaches the grid; the other two are dropped.
+    ///
+    /// `load_excel` reads every sheet name and then uses `sheet_names[0]`, so a
+    /// three-sheet workbook is silently reduced to one. Opening such a file and
+    /// saving it therefore discards two thirds of the document.
+    #[test]
+    fn loading_a_multi_sheet_workbook_keeps_only_the_first_sheet() {
+        let mut sheet = Spreadsheet::new();
+        sheet
+            .load_from_file(&fixture("three_sheets.xlsx"))
+            .expect("fixture loads");
+
+        // Sheet "Alpha" (the first) is present.
+        assert_eq!(sheet.get_cell(0, 0), "Name");
+        assert_eq!(sheet.get_cell(0, 1), "Qty");
+        assert_eq!(sheet.get_cell(1, 0), "widget");
+        assert_eq!(sheet.get_cell(2, 0), "gadget");
+
+        // Nothing from "Beta" ("flag") or "Gamma" ("cross") is reachable: the
+        // grid holds a single sheet and has no notion of the others.
+        let all_values: Vec<&str> = sheet.cells.values().map(String::as_str).collect();
+        assert!(
+            !all_values.contains(&"flag"),
+            "sheet Beta leaked into the grid: {all_values:?}"
+        );
+        assert!(
+            !all_values.contains(&"cross"),
+            "sheet Gamma leaked into the grid: {all_values:?}"
+        );
+    }
+
+    /// Numbers arrive as their cached display text, not as typed values.
+    ///
+    /// Integral floats lose the decimal point (`10.0` becomes `"10"`), which is
+    /// what the grid stores and what a later CSV save writes out.
+    #[test]
+    fn integral_numbers_are_stored_without_a_decimal_point() {
+        let mut sheet = Spreadsheet::new();
+        sheet
+            .load_from_file(&fixture("three_sheets.xlsx"))
+            .expect("fixture loads");
+
+        assert_eq!(sheet.get_cell(1, 1), "10");
+        assert_eq!(sheet.get_cell(2, 1), "20");
+    }
+
+    /// Formula cells contribute their cached result, never the formula text.
+    ///
+    /// `Alpha!C2` holds `=SUM(B2:B3)` with a cached value of 30. The loader sees
+    /// only the cached number, so the formula itself is not recoverable from the
+    /// grid — editing and saving the file would replace it with a constant.
+    #[test]
+    fn formula_cells_load_as_their_cached_result() {
+        let mut sheet = Spreadsheet::new();
+        sheet
+            .load_from_file(&fixture("three_sheets.xlsx"))
+            .expect("fixture loads");
+
+        assert_eq!(sheet.get_cell(1, 2), "30");
+    }
+
+    /// Dimensions grow to fit the data but never shrink below the defaults.
+    #[test]
+    fn dimensions_are_at_least_the_defaults_after_loading() {
+        let mut sheet = Spreadsheet::new();
+        sheet
+            .load_from_file(&fixture("three_sheets.xlsx"))
+            .expect("fixture loads");
+
+        assert!(sheet.num_rows >= DEFAULT_ROWS);
+        assert!(sheet.num_cols >= DEFAULT_COLS);
+    }
+
+    /// Loading replaces the previous contents rather than merging into them.
+    #[test]
+    fn loading_clears_any_previously_held_cells() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(50, 20, "stale".to_string());
+
+        sheet
+            .load_from_file(&fixture("three_sheets.xlsx"))
+            .expect("fixture loads");
+
+        assert_eq!(sheet.get_cell(50, 20), "");
+    }
+
+    /// An unknown extension is rejected before any file access happens.
+    #[test]
+    fn unsupported_extensions_are_rejected() {
+        let mut sheet = Spreadsheet::new();
+        let err = sheet
+            .load_from_file("/nonexistent/data.ods")
+            .expect_err("ods is not supported");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("Unsupported file format"));
+    }
+}
