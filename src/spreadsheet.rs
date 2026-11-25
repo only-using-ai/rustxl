@@ -10,6 +10,8 @@ use crate::constants::{DEFAULT_COLS, DEFAULT_ROWS};
 use crate::formula::FormulaEvaluator;
 use crate::formula_ref::{self, Axis, Edit};
 use crate::shell::ShellPrompt;
+#[cfg(test)]
+use crate::sparse_ui_probe::{self, Work};
 use crate::types::{CellStyle, RowColumnSelectMode, SaveFormat, StdinFormat, VisualSubMode};
 use crate::update::UpdateInfo;
 
@@ -144,6 +146,8 @@ pub struct Spreadsheet {
     pub formula_suggestion_index: usize,
     pub formula_prefix: String,
 }
+
+pub type SelectionStats = (usize, usize, usize, f64);
 
 impl Spreadsheet {
     pub fn new() -> Self {
@@ -314,16 +318,17 @@ impl Spreadsheet {
         }
 
         let query_lower = self.find_query.to_lowercase();
-        
-        // Search through all cells
-        for row in 0..self.num_rows {
-            for col in 0..self.num_cols {
-                let content = self.get_cell(row, col);
-                if !content.is_empty() && content.to_lowercase().contains(&query_lower) {
-                    self.find_matches.push((row, col));
-                }
-            }
-        }
+        self.find_matches
+            .extend(self.cells.iter().filter_map(|(&(row, col), content)| {
+                #[cfg(test)]
+                sparse_ui_probe::record(Work::FindCandidate);
+                (row < self.num_rows
+                    && col < self.num_cols
+                    && !content.is_empty()
+                    && content.to_lowercase().contains(&query_lower))
+                .then_some((row, col))
+            }));
+        self.find_matches.sort_unstable();
 
         // Move cursor to first match if any
         if let Some(&(row, col)) = self.find_matches.first() {
@@ -333,7 +338,15 @@ impl Spreadsheet {
     }
 
     pub fn is_find_match(&self, row: usize, col: usize) -> bool {
-        self.find_mode && self.find_matches.contains(&(row, col))
+        self.find_mode
+            && self
+                .find_matches
+                .binary_search_by(|position| {
+                    #[cfg(test)]
+                    sparse_ui_probe::record(Work::HighlightComparison);
+                    position.cmp(&(row, col))
+                })
+                .is_ok()
     }
 
     /// Copy the current selection (or single cell) to clipboard
@@ -669,7 +682,7 @@ impl Spreadsheet {
 
     /// Returns selection stats: (row_count, cell_count, numeric_count, sum) for the current selection
     /// Returns None if no multi-cell selection exists
-    pub fn get_selection_stats(&self) -> Option<(usize, usize, usize, f64)> {
+    pub fn get_selection_stats(&self) -> Option<SelectionStats> {
         // Get the effective selection range - could be from selection_anchor, selected_rows, or selected_cols
         let range = if let Some(((min_row, min_col), (max_row, max_col))) = self.get_selection_range() {
             // Regular cell selection
@@ -689,29 +702,58 @@ impl Spreadsheet {
 
         let (min_row, min_col, max_row, max_col) = range?;
 
+        let mut row_count = 0;
+        let mut last_row = None;
         let mut cell_count = 0usize;
         let mut numeric_count = 0usize;
         let mut sum = 0.0f64;
-        let mut rows_with_data = std::collections::HashSet::new();
         let mut formulas = FormulaEvaluator::new(self);
 
-        for row in min_row..=max_row {
-            for col in min_col..=max_col {
-                let content = self.get_cell(row, col);
-                if !content.is_empty() {
-                    cell_count += 1;
-                    rows_with_data.insert(row);
-                    // Evaluate the cell to get the actual value (handles formulas)
-                    let evaluated = formulas.evaluate(row, col);
-                    if let Ok(val) = evaluated.parse::<f64>() {
-                        numeric_count += 1;
-                        sum += val;
+        let mut add_cell = |row, col| {
+            if last_row != Some(row) {
+                last_row = Some(row);
+                row_count += 1;
+            }
+            cell_count += 1;
+            let evaluated = formulas.evaluate(row, col);
+            if let Ok(val) = evaluated.parse::<f64>() {
+                numeric_count += 1;
+                sum += val;
+            }
+        };
+
+        let rows = min_row..=max_row;
+        let cols = min_col..=max_col;
+        let height = (max_row - min_row).saturating_add(1);
+        let width = (max_col - min_col).saturating_add(1);
+        let area = height.saturating_mul(width);
+        if area <= self.cells.len() {
+            for row in rows {
+                for col in cols.clone() {
+                    #[cfg(test)]
+                    sparse_ui_probe::record(Work::SelectionCandidate);
+                    if !self.get_cell(row, col).is_empty() {
+                        add_cell(row, col);
                     }
                 }
             }
+        } else {
+            let mut positions: Vec<_> = self
+                .cells
+                .iter()
+                .filter_map(|(&(row, col), value)| {
+                    #[cfg(test)]
+                    sparse_ui_probe::record(Work::SelectionCandidate);
+                    (rows.contains(&row) && cols.contains(&col) && !value.is_empty())
+                        .then_some((row, col))
+                })
+                .collect();
+            // Preserve row-major floating-point addition order.
+            positions.sort_unstable();
+            for (row, col) in positions {
+                add_cell(row, col);
+            }
         }
-
-        let row_count = rows_with_data.len();
 
         if cell_count > 0 {
             Some((row_count, cell_count, numeric_count, sum))
@@ -1456,6 +1498,99 @@ impl Default for Spreadsheet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sparse_ui_probe::count_work;
+
+    #[test]
+    fn sparse_find_preserves_sorted_matches_and_the_first_match_cursor() {
+        let mut sheet = Spreadsheet::new();
+        sheet.num_rows = 1000;
+        sheet.num_cols = 1000;
+        for (row, col, value) in [
+            (999, 0, "Écho"),
+            (0, 5, "ÉCHO"),
+            (0, 2, "Écho"),
+            (1000, 0, "Écho"),
+            (4, 2, "other"),
+        ] {
+            sheet.set_cell(row, col, value.into());
+        }
+        sheet.enter_find_mode();
+        sheet.find_query = "écho".into();
+        let ((), work) = count_work(|| sheet.update_find_matches());
+        assert_eq!(work.find_candidates, 5);
+        assert_eq!(sheet.find_matches, [(0, 2), (0, 5), (999, 0)]);
+        assert_eq!((sheet.cursor_row, sheet.cursor_col), (0, 2));
+        assert!(sheet.is_find_match(999, 0));
+        assert!(!sheet.is_find_match(1000, 0));
+
+        sheet.find_query.clear();
+        let ((), work) = count_work(|| sheet.update_find_matches());
+        assert_eq!(work.find_candidates, 0);
+        assert!(sheet.find_matches.is_empty());
+        assert_eq!((sheet.cursor_row, sheet.cursor_col), (0, 2));
+    }
+
+    #[test]
+    fn find_highlights_use_logarithmic_membership_with_many_matches() {
+        let mut sheet = Spreadsheet::new();
+        sheet.num_cols = 100;
+        for row in (0..100).rev() {
+            for col in (0..100).rev() {
+                sheet.set_cell(row, col, "match".into());
+            }
+        }
+        sheet.enter_find_mode();
+        sheet.find_query = "match".into();
+        sheet.update_find_matches();
+        assert_eq!(sheet.find_matches.len(), 10_000);
+        assert_eq!(sheet.find_matches.first(), Some(&(0, 0)));
+        assert_eq!(sheet.find_matches.last(), Some(&(99, 99)));
+        let (matches, work) = count_work(|| (sheet.is_find_match(99, 99), sheet.is_find_match(100, 1)));
+        assert_eq!(matches, (true, false));
+        assert!(work.highlight_comparisons <= 30);
+
+        sheet.exit_find_mode();
+        let (matched, work) = count_work(|| sheet.is_find_match(99, 99));
+        assert!(!matched);
+        assert_eq!(work.highlight_comparisons, 0);
+    }
+
+    #[test]
+    fn selection_stats_preserve_row_major_sum_and_refresh_after_edits() {
+        let mut sheet = Spreadsheet::new();
+        sheet.num_rows = 1000;
+        sheet.num_cols = 1000;
+        for (row, col, value) in [
+            (1, 0, "-10000000000000000"),
+            (0, 3, "1"),
+            (1, 1, "=ABS(C2)"),
+            (0, 0, "10000000000000000"),
+            (1, 2, "7"),
+            (1000, 0, "outside"),
+        ] {
+            sheet.set_cell(row, col, value.into());
+        }
+        sheet.selection_anchor = Some((0, 0));
+        sheet.cursor_row = 999;
+        sheet.cursor_col = 999;
+        let (stats, work) = count_work(|| sheet.get_selection_stats());
+        assert_eq!(stats, Some((2, 5, 5, 14.0)));
+        assert_eq!(work.selection_candidates, 6);
+
+        sheet.set_cell(1, 2, "3".into());
+        assert_eq!(sheet.get_selection_stats(), Some((2, 5, 5, 6.0)));
+        sheet.selection_anchor = Some((1, 1));
+        sheet.cursor_row = 1;
+        sheet.cursor_col = 2;
+        let (stats, work) = count_work(|| sheet.get_selection_stats());
+        assert_eq!(stats, Some((1, 2, 2, 6.0)));
+        assert_eq!(work.selection_candidates, 2);
+
+        sheet.clear_selection();
+        assert_eq!(sheet.get_selection_stats(), None);
+        sheet.selected_cols = Some((1, 2));
+        assert_eq!(sheet.get_selection_stats(), Some((1, 2, 2, 6.0)));
+    }
     use crate::clipboard::OfflineClipboard;
 
     #[test]
