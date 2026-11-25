@@ -150,7 +150,6 @@ impl Spreadsheet {
 mod tests {
     use super::*;
     use crate::constants::{DEFAULT_COLS, DEFAULT_ROWS};
-    use crate::spreadsheet::ClipboardData;
     use crate::types::{RowColumnSelectMode, StdinFormat};
     use crate::update::UpdateInfo;
     use std::io::Write;
@@ -249,11 +248,7 @@ mod tests {
         sheet.find_mode = true;
         sheet.find_query = "old".into();
         sheet.find_matches.push((DEFAULT_ROWS, DEFAULT_COLS));
-        sheet.clipboard_data = Some(ClipboardData {
-            cells: vec![],
-            is_cut: true,
-            cut_origin: Some((0, 0)),
-        });
+        sheet.clipboard_data = Some(sheet.capture_clipboard(true));
         sheet.enter_open_mode();
         sheet.open_filename = path.to_str().unwrap().into();
         sheet.save_filename = "old save".into();

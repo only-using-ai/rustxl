@@ -9,14 +9,20 @@ use crate::types::{CellStyle, RowColumnSelectMode, SaveFormat, StdinFormat, Visu
 use crate::update::UpdateInfo;
 
 /// Represents copied/cut cell data with relative positions
-#[derive(Clone)]
 pub struct ClipboardData {
     /// Cell data: ((relative_row, relative_col), value, style)
-    pub cells: Vec<((usize, usize), String, Option<CellStyle>)>,
-    /// Whether this was a cut operation (cells should be cleared on paste)
-    pub is_cut: bool,
-    /// Original position of the cut (for clearing on paste)
-    pub cut_origin: Option<(usize, usize)>,
+    cells: Vec<((usize, usize), String, Option<CellStyle>)>,
+    origin: (usize, usize),
+    height: usize,
+    width: usize,
+    action: ClipboardAction,
+}
+
+#[derive(PartialEq)]
+enum ClipboardAction {
+    Copy,
+    Cut,
+    StaleCut,
 }
 
 pub struct Spreadsheet {
@@ -67,6 +73,7 @@ pub struct Spreadsheet {
     pub find_matches: Vec<(usize, usize)>, // List of (row, col) matching the query
     // Clipboard (internal for cut tracking)
     pub clipboard_data: Option<ClipboardData>,
+    pub clipboard_message: Option<&'static str>,
     // Command mode (vim-style :command)
     pub command_mode: bool,
     pub command_buffer: String,
@@ -126,6 +133,7 @@ impl Spreadsheet {
             find_query: String::new(),
             find_matches: Vec::new(),
             clipboard_data: None,
+            clipboard_message: None,
             command_mode: false,
             command_buffer: String::new(),
             command_message: None,
@@ -287,62 +295,84 @@ impl Spreadsheet {
     }
 
     fn copy_or_cut_selection(&mut self, is_cut: bool) {
-        // Determine the range to copy
-        let (min_row, min_col, max_row, max_col) = if let Some(((r1, c1), (r2, c2))) = self.get_selection_range() {
-            (r1, c1, r2, c2)
+        let snapshot = self.capture_clipboard(is_cut);
+        let (start_row, start_col) = snapshot.origin;
+        let mut text = String::new();
+        for row in 0..snapshot.height {
+            if row > 0 {
+                text.push('\n');
+            }
+            for col in 0..snapshot.width {
+                if col > 0 {
+                    text.push('\t');
+                }
+                text.push_str(self.get_cell(start_row + row, start_col + col));
+            }
+        }
+
+        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+            let _ = clipboard.set_text(text);
+        }
+        self.clipboard_data = Some(snapshot);
+    }
+
+    pub(crate) fn capture_clipboard(&self, is_cut: bool) -> ClipboardData {
+        let (origin, end) = if let Some(range) = self.get_selection_range() {
+            range
         } else if let Some((min_row, max_row)) = self.selected_rows {
-            (min_row, 0, max_row, self.num_cols - 1)
+            ((min_row, 0), (max_row, self.num_cols - 1))
         } else if let Some((min_col, max_col)) = self.selected_cols {
-            (0, min_col, self.num_rows - 1, max_col)
+            ((0, min_col), (self.num_rows - 1, max_col))
         } else {
-            // Single cell
-            (self.cursor_row, self.cursor_col, self.cursor_row, self.cursor_col)
+            let position = (self.cursor_row, self.cursor_col);
+            (position, position)
         };
 
-        // Collect cell data with relative positions
-        let mut cells_data = Vec::new();
-        for row in min_row..=max_row {
-            for col in min_col..=max_col {
-                let rel_row = row - min_row;
-                let rel_col = col - min_col;
-                let value = self.get_cell(row, col).to_string();
-                let style = self.cell_styles.get(&(row, col)).copied();
-                
-                // Only include non-empty cells or cells with styles
-                if !value.is_empty() || style.is_some() {
-                    cells_data.push(((rel_row, rel_col), value, style));
-                }
+        let height = end.0 - origin.0 + 1;
+        let width = end.1 - origin.1 + 1;
+        ClipboardData {
+            cells: self
+                .clipboard_contents(origin, height, width)
+                .map(|(offset, value, style)| (offset, value.to_owned(), style))
+                .collect(),
+            origin,
+            height,
+            width,
+            action: if is_cut {
+                ClipboardAction::Cut
+            } else {
+                ClipboardAction::Copy
+            },
+        }
+    }
+
+    fn clipboard_contents(
+        &self,
+        (start_row, start_col): (usize, usize),
+        height: usize,
+        width: usize,
+    ) -> impl Iterator<Item = ((usize, usize), &str, Option<CellStyle>)> {
+        (0..height).flat_map(move |row| {
+            (0..width).filter_map(move |col| {
+                let position = (start_row + row, start_col + col);
+                let value = self.get_cell(position.0, position.1);
+                let style = self.cell_styles.get(&position).copied();
+                (!value.is_empty() || style.is_some()).then_some(((row, col), value, style))
+            })
+        })
+    }
+
+    fn invalidate_cut(&mut self) {
+        if let Some(snapshot) = &mut self.clipboard_data {
+            if snapshot.action == ClipboardAction::Cut {
+                snapshot.action = ClipboardAction::StaleCut;
             }
         }
-
-        // Build tab-separated text for system clipboard
-        let mut clipboard_text = String::new();
-        for row in min_row..=max_row {
-            let mut row_values = Vec::new();
-            for col in min_col..=max_col {
-                row_values.push(self.get_cell(row, col).to_string());
-            }
-            if row > min_row {
-                clipboard_text.push('\n');
-            }
-            clipboard_text.push_str(&row_values.join("\t"));
-        }
-
-        // Try to set system clipboard
-        if let Ok(mut clipboard) = arboard::Clipboard::new() {
-            let _ = clipboard.set_text(&clipboard_text);
-        }
-
-        // Store internal clipboard data
-        self.clipboard_data = Some(ClipboardData {
-            cells: cells_data,
-            is_cut,
-            cut_origin: if is_cut { Some((min_row, min_col)) } else { None },
-        });
     }
 
     /// Paste from clipboard at current cursor position
     pub fn paste(&mut self) {
+        self.clipboard_message = None;
         // First, try to use internal clipboard data if available
         if let Some(clipboard_data) = self.clipboard_data.take() {
             self.paste_internal(clipboard_data);
@@ -357,53 +387,57 @@ impl Spreadsheet {
         }
     }
 
-    fn paste_internal(&mut self, clipboard_data: ClipboardData) {
+    fn paste_internal(&mut self, mut snapshot: ClipboardData) {
         let dest_row = self.cursor_row;
         let dest_col = self.cursor_col;
 
-        // If this was a cut operation, clear the original cells first
-        if clipboard_data.is_cut {
-            if let Some((orig_row, orig_col)) = clipboard_data.cut_origin {
-                for ((rel_row, rel_col), _, _) in &clipboard_data.cells {
-                    let src_row = orig_row + rel_row;
-                    let src_col = orig_col + rel_col;
-                    self.cells.remove(&(src_row, src_col));
-                    self.cell_styles.remove(&(src_row, src_col));
-                }
+        let captured = snapshot
+            .cells
+            .iter()
+            .map(|(offset, value, style)| (*offset, value.as_str(), *style));
+        let source_changed = snapshot.action == ClipboardAction::Cut
+            && !self
+                .clipboard_contents(snapshot.origin, snapshot.height, snapshot.width)
+                .eq(captured);
+        if snapshot.action == ClipboardAction::StaleCut || source_changed {
+            snapshot.action = ClipboardAction::Copy;
+            self.clipboard_data = Some(snapshot);
+            self.clipboard_message = Some("  Cut canceled. Paste again to copy.");
+            return;
+        }
+
+        if snapshot.action == ClipboardAction::Cut {
+            let (source_row, source_col) = snapshot.origin;
+            for &((row, col), _, _) in &snapshot.cells {
+                let position = (source_row + row, source_col + col);
+                self.cells.remove(&position);
+                self.cell_styles.remove(&position);
             }
         }
 
-        // Paste cells at new position
-        for ((rel_row, rel_col), value, style) in &clipboard_data.cells {
-            let new_row = dest_row + rel_row;
-            let new_col = dest_col + rel_col;
-
-            // Expand grid if needed
-            if new_row >= self.num_rows {
-                self.num_rows = new_row + 1;
+        let end_row = dest_row + snapshot.height;
+        let end_col = dest_col + snapshot.width;
+        self.num_rows = self.num_rows.max(end_row);
+        self.num_cols = self.num_cols.max(end_col);
+        for row in dest_row..end_row {
+            for col in dest_col..end_col {
+                self.cells.remove(&(row, col));
+                self.cell_styles.remove(&(row, col));
             }
-            if new_col >= self.num_cols {
-                self.num_cols = new_col + 1;
-            }
+        }
 
-            // Set cell value
+        for ((rel_row, rel_col), value, style) in &snapshot.cells {
+            let position = (dest_row + rel_row, dest_col + rel_col);
             if !value.is_empty() {
-                self.cells.insert((new_row, new_col), value.clone());
+                self.cells.insert(position, value.clone());
             }
-
-            // Set cell style
             if let Some(s) = style {
-                self.cell_styles.insert((new_row, new_col), *s);
+                self.cell_styles.insert(position, *s);
             }
         }
 
-        // Re-store clipboard data for multiple pastes (but mark as copy, not cut)
-        self.clipboard_data = Some(ClipboardData {
-            cells: clipboard_data.cells,
-            is_cut: false,
-            cut_origin: None,
-        });
-
+        snapshot.action = ClipboardAction::Copy;
+        self.clipboard_data = Some(snapshot);
         self.clear_selection();
     }
 
@@ -413,26 +447,11 @@ impl Spreadsheet {
 
         for (row_offset, line) in text.lines().enumerate() {
             let new_row = dest_row + row_offset;
-            
-            // Expand rows if needed
-            if new_row >= self.num_rows {
-                self.num_rows = new_row + 1;
-            }
-
-            // Split by tabs (Excel/spreadsheet format)
-            let values: Vec<&str> = line.split('\t').collect();
-            
-            for (col_offset, value) in values.iter().enumerate() {
+            self.num_rows = self.num_rows.max(new_row + 1);
+            for (col_offset, value) in line.split('\t').enumerate() {
                 let new_col = dest_col + col_offset;
-                
-                // Expand columns if needed
-                if new_col >= self.num_cols {
-                    self.num_cols = new_col + 1;
-                }
-
-                if !value.is_empty() {
-                    self.cells.insert((new_row, new_col), value.to_string());
-                }
+                self.num_cols = self.num_cols.max(new_col + 1);
+                self.set_cell(new_row, new_col, value.to_owned());
             }
         }
 
@@ -942,6 +961,7 @@ impl Spreadsheet {
 
     pub fn delete_selected_rows(&mut self) {
         if let Some((min_row, max_row)) = self.selected_rows {
+            self.invalidate_cut();
             // Delete rows from bottom to top to avoid index shifting issues
             for row in (min_row..=max_row).rev() {
                 self.delete_row(row);
@@ -960,6 +980,7 @@ impl Spreadsheet {
 
     pub fn delete_selected_columns(&mut self) {
         if let Some((min_col, max_col)) = self.selected_cols {
+            self.invalidate_cut();
             // Delete columns from right to left to avoid index shifting issues
             for col in (min_col..=max_col).rev() {
                 self.delete_column(col);
@@ -978,6 +999,7 @@ impl Spreadsheet {
 
     pub fn insert_rows_after_selected(&mut self) {
         if let Some((min_row, max_row)) = self.selected_rows {
+            self.invalidate_cut();
             let count = max_row - min_row + 1;
             // Insert after the last selected row
             let insert_after = max_row;
@@ -992,6 +1014,7 @@ impl Spreadsheet {
 
     pub fn insert_columns_after_selected(&mut self) {
         if let Some((min_col, max_col)) = self.selected_cols {
+            self.invalidate_cut();
             let count = max_col - min_col + 1;
             // Insert after the last selected column
             let insert_after = max_col;
@@ -1372,6 +1395,187 @@ mod tests {
 
         sheet.clear_selection();
         assert!(sheet.get_selection_range().is_none());
+    }
+
+    #[test]
+    fn stale_cut_cancels_overlapping_paste_and_remains_available_as_copy() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "first".into());
+        sheet.set_cell(0, 1, "second".into());
+        sheet.set_cell(0, 2, "destination".into());
+        sheet.selection_anchor = Some((0, 0));
+        sheet.cursor_col = 1;
+        sheet.clipboard_data = Some(sheet.capture_clipboard(true));
+        sheet.set_cell(0, 1, "edited".into());
+
+        sheet.paste();
+
+        assert_eq!(sheet.get_cell(0, 0), "first");
+        assert_eq!(sheet.get_cell(0, 1), "edited");
+        assert_eq!(sheet.get_cell(0, 2), "destination");
+        assert!(sheet.clipboard_message.is_some());
+
+        sheet.cursor_col = 3;
+        sheet.paste();
+        assert_eq!(sheet.get_cell(0, 1), "edited");
+        assert_eq!(sheet.get_cell(0, 3), "first");
+        assert_eq!(sheet.get_cell(0, 4), "second");
+        assert!(sheet.clipboard_message.is_none());
+    }
+
+    #[test]
+    fn cut_detects_new_content_in_a_previously_blank_field() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "first".into());
+        sheet.selection_anchor = Some((0, 0));
+        sheet.cursor_col = 1;
+        sheet.clipboard_data = Some(sheet.capture_clipboard(true));
+        sheet.set_cell(0, 1, "new".into());
+        sheet.cursor_col = 2;
+
+        sheet.paste();
+
+        assert_eq!(sheet.get_cell(0, 0), "first");
+        assert_eq!(sheet.get_cell(0, 1), "new");
+        assert_eq!(sheet.get_cell(0, 2), "");
+        assert!(sheet.clipboard_message.is_some());
+    }
+
+    #[test]
+    fn cut_detects_a_style_change() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "same value".into());
+        sheet.clipboard_data = Some(sheet.capture_clipboard(true));
+        sheet.set_cell_bold(0, 0, true);
+        sheet.cursor_col = 1;
+
+        sheet.paste();
+
+        assert_eq!(sheet.get_cell(0, 0), "same value");
+        assert!(sheet.get_cell_style(0, 0).bold);
+        assert_eq!(sheet.get_cell(0, 1), "");
+        assert!(sheet.clipboard_message.is_some());
+    }
+
+    #[test]
+    fn row_deletion_invalidates_cut_even_if_old_coordinates_still_match() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(1, 0, "same value".into());
+        sheet.set_cell(2, 0, "same value".into());
+        sheet.cursor_row = 1;
+        sheet.clipboard_data = Some(sheet.capture_clipboard(true));
+
+        sheet.selected_rows = Some((0, 0));
+        sheet.delete_selected_rows();
+        sheet.cursor_col = 1;
+        sheet.paste();
+
+        assert_eq!(sheet.get_cell(0, 0), "same value");
+        assert_eq!(sheet.get_cell(1, 0), "same value");
+        assert_eq!(sheet.get_cell(0, 1), "");
+        assert!(sheet.clipboard_message.is_some());
+    }
+
+    #[test]
+    fn column_insertion_invalidates_cut_even_if_old_coordinates_still_match() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 1, "same value".into());
+        sheet.set_cell(0, 2, "same value".into());
+        sheet.cursor_col = 2;
+        sheet.clipboard_data = Some(sheet.capture_clipboard(true));
+
+        sheet.selected_cols = Some((0, 0));
+        sheet.insert_columns_after_selected();
+        sheet.cursor_col = 4;
+        sheet.paste();
+
+        assert_eq!(sheet.get_cell(0, 2), "same value");
+        assert_eq!(sheet.get_cell(0, 3), "same value");
+        assert_eq!(sheet.get_cell(0, 4), "");
+        assert!(sheet.clipboard_message.is_some());
+    }
+
+    #[test]
+    fn valid_overlapping_cut_moves_values_and_styles() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "first".into());
+        sheet.set_cell_bold(0, 0, true);
+        sheet.set_cell(0, 1, "second".into());
+        sheet.selection_anchor = Some((0, 0));
+        sheet.cursor_col = 1;
+        sheet.clipboard_data = Some(sheet.capture_clipboard(true));
+
+        sheet.paste();
+
+        assert_eq!(sheet.get_cell(0, 0), "");
+        assert!(!sheet.get_cell_style(0, 0).bold);
+        assert_eq!(sheet.get_cell(0, 1), "first");
+        assert!(sheet.get_cell_style(0, 1).bold);
+        assert_eq!(sheet.get_cell(0, 2), "second");
+        assert!(!sheet.get_cell_style(0, 2).bold);
+        assert!(sheet.clipboard_message.is_none());
+    }
+
+    #[test]
+    fn internal_paste_replaces_full_rectangle_and_keeps_source_styles() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "copied".into());
+        sheet.set_cell_bold(0, 1, true);
+        sheet.selection_anchor = Some((0, 0));
+        sheet.cursor_row = 1;
+        sheet.cursor_col = 2;
+        sheet.clipboard_data = Some(sheet.capture_clipboard(false));
+
+        for row in 3..=5 {
+            for col in 4..=7 {
+                sheet.set_cell(row, col, "previous".into());
+                sheet.set_cell_bold(row, col, true);
+            }
+        }
+        sheet.cursor_row = 3;
+        sheet.cursor_col = 4;
+        sheet.paste();
+
+        assert_eq!(sheet.get_cell(3, 4), "copied");
+        assert_eq!(sheet.get_cell(3, 5), "");
+        assert!(sheet.get_cell_style(3, 5).bold);
+        for (row, col) in [(3, 6), (4, 4), (4, 5), (4, 6)] {
+            assert_eq!(sheet.get_cell(row, col), "");
+            assert!(!sheet.get_cell_style(row, col).bold);
+        }
+        assert!(!sheet.get_cell_style(3, 4).bold);
+        assert_eq!(sheet.get_cell(5, 4), "previous");
+        assert_eq!(sheet.get_cell(3, 7), "previous");
+
+        sheet.cursor_row = DEFAULT_ROWS - 1;
+        sheet.cursor_col = DEFAULT_COLS - 1;
+        sheet.paste();
+        assert_eq!(sheet.get_cell(DEFAULT_ROWS - 1, DEFAULT_COLS - 1), "copied");
+        assert_eq!(sheet.num_rows, DEFAULT_ROWS + 1);
+        assert_eq!(sheet.num_cols, DEFAULT_COLS + 2);
+    }
+
+    #[test]
+    fn external_paste_clears_explicit_empty_fields_and_preserves_formatting() {
+        let mut sheet = Spreadsheet::new();
+        for row in 0..3 {
+            for col in 0..5 {
+                sheet.set_cell(row, col, "previous".into());
+                sheet.set_cell_bold(row, col, true);
+            }
+        }
+
+        sheet.paste_text("left\t\tright\t\r\nnext\r\n\r\n");
+
+        assert_eq!(sheet.get_cell(0, 0), "left");
+        assert_eq!(sheet.get_cell(0, 2), "right");
+        for (row, col) in [(0, 1), (0, 3), (2, 0)] {
+            assert_eq!(sheet.get_cell(row, col), "");
+            assert!(sheet.get_cell_style(row, col).bold);
+        }
+        assert_eq!(sheet.get_cell(0, 4), "previous");
+        assert_eq!(sheet.get_cell(1, 0), "next");
+        assert_eq!(sheet.get_cell(1, 1), "previous");
     }
 
     #[test]

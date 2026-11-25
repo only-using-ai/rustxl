@@ -27,7 +27,7 @@ pub enum DataType {
     Time,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq)]
 pub struct CellStyle {
     pub fg: Option<Color>,
     pub bg: Option<Color>,

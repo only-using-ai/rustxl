@@ -751,7 +751,12 @@ fn render_status_bar(f: &mut Frame, spreadsheet: &Spreadsheet, area: Rect) {
         )
     };
 
-    let status = if spreadsheet.command_mode {
+    let status = if let Some(message) = spreadsheet.clipboard_message {
+        Line::from(vec![
+            Span::styled(mode, mode_style),
+            Span::styled(message, Style::default().fg(Color::Yellow)),
+        ])
+    } else if spreadsheet.command_mode {
         render_command_status(spreadsheet, mode, mode_style)
     } else if spreadsheet.open_mode {
         render_open_status(spreadsheet, mode, mode_style)

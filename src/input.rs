@@ -49,6 +49,7 @@ pub fn run_app(
                     if key.kind != KeyEventKind::Press {
                         continue;
                     }
+                    spreadsheet.clipboard_message = None;
 
                     if spreadsheet.shell_prompt.is_some() {
                         let confirming = matches!(key.code, KeyCode::Char('r' | 'a'));
@@ -901,6 +902,24 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect()
+    }
+
+    #[test]
+    fn paste_shortcut_shows_canceled_cut_feedback() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "original".into());
+        sheet.clipboard_data = Some(sheet.capture_clipboard(true));
+        sheet.set_cell(0, 0, "edited".into());
+        sheet.cursor_col = 1;
+
+        handle_ready_mode(&mut sheet, KeyCode::Char('v'), KeyModifiers::CONTROL);
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        assert!(
+            render_sheet(&mut terminal, &mut sheet).contains("Cut canceled. Paste again to copy.")
+        );
+        assert_eq!(sheet.get_cell(0, 0), "edited");
+        assert_eq!(sheet.get_cell(0, 1), "");
     }
 
     #[test]
