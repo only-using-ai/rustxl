@@ -30,6 +30,13 @@ enum AggregateInput<'a> {
     Scalar(&'a str),
 }
 
+fn binary_operator(expr: &str) -> Option<usize> {
+    formula_ref::top_level_delimiters(expr, b"+-")
+        .filter(|&index| index > 0)
+        .last()
+        .or_else(|| formula_ref::top_level_delimiters(expr, b"*/").last())
+}
+
 impl Spreadsheet {
     pub fn evaluate_cell(&self, row: usize, col: usize) -> String {
         FormulaEvaluator::new(self).evaluate_cell(row, col)
@@ -83,6 +90,14 @@ impl<'sheet> FormulaEvaluator<'sheet> {
             } else {
                 "#ERROR".to_string()
             };
+        }
+        if let Ok(value) = expr.parse::<f64>() {
+            return value.to_string();
+        }
+        if let Some(operator) = binary_operator(expr) {
+            return self
+                .evaluate_binary(expr, operator, row, col)
+                .map_or_else(|| "#ERROR".to_string(), |value| value.to_string());
         }
         let expr_upper = expr.to_uppercase();
 
@@ -290,11 +305,6 @@ impl<'sheet> FormulaEvaluator<'sheet> {
             return self.evaluate_median(inner, (row, col));
         }
 
-        // Handle simple arithmetic
-        if let Ok(val) = self.evaluate_arithmetic(expr) {
-            return format!("{}", val);
-        }
-
         // Try to parse as cell reference
         if let Some(val) = self.get_cell_value(expr) {
             return format!("{}", val);
@@ -310,7 +320,7 @@ impl<'sheet> FormulaEvaluator<'sheet> {
     ) -> Result<(), ()> {
         for arg in self.split_function_args(args) {
             let arg = arg.trim();
-            if let Some(colon) = formula_ref::top_level_delimiters(arg, b':').next() {
+            if let Some(colon) = formula_ref::top_level_delimiters(arg, b":").next() {
                 let start = self.parse_cell_ref(&arg[..colon]);
                 let end = self.parse_cell_ref(&arg[colon + 1..]);
                 let (Some((sr, sc)), Some((er, ec))) = (start, end) else {
@@ -499,7 +509,7 @@ impl<'sheet> FormulaEvaluator<'sheet> {
 
     fn split_function_args<'a>(&self, args: &'a str) -> Vec<&'a str> {
         let mut start = 0;
-        formula_ref::top_level_delimiters(args, b',')
+        formula_ref::top_level_delimiters(args, b",")
             .chain(std::iter::once(args.len()))
             .map(|end| {
                 let argument = &args[start..end];
@@ -538,25 +548,27 @@ impl<'sheet> FormulaEvaluator<'sheet> {
     pub fn evaluate_arg(&mut self, arg: &str, current_row: usize, current_col: usize) -> String {
         let arg = arg.trim();
 
-        // Check for matching quotes (single or double)
-        if arg.len() >= 2 {
-            let first_char = arg.chars().next().unwrap();
-            let last_char = arg.chars().last().unwrap();
-            if (first_char == '"' && last_char == '"') || (first_char == '\'' && last_char == '\'') {
-                return arg[1..arg.len() - 1].to_string();
-            }
+        if let Some(literal) = formula_ref::quoted_literal(arg) {
+            return literal.to_string();
         }
 
         if arg.contains('(') {
-            return self.evaluate_formula(&format!("={}", arg), current_row, current_col);
+            return self.evaluate_formula(arg, current_row, current_col);
         }
 
         if let Some((row, col)) = self.parse_cell_ref(arg) {
             return self.evaluate_cell(row, col);
         }
 
-        if arg.parse::<f64>().is_ok() {
-            return arg.to_string();
+        if arg.parse::<f64>().is_err()
+            && let Some(operator) = binary_operator(arg)
+        {
+            if let Some(value) = self.evaluate_binary(arg, operator, current_row, current_col) {
+                return value.to_string();
+            }
+            if let Some(error) = self.error {
+                return error.display();
+            }
         }
 
         arg.to_string()
@@ -565,49 +577,32 @@ impl<'sheet> FormulaEvaluator<'sheet> {
     pub fn evaluate_arg_as_number(&mut self, arg: &str, current_row: usize, current_col: usize) -> Option<f64> {
         let arg = arg.trim();
 
-        if arg.contains('(') {
-            let result = self.evaluate_formula(&format!("={}", arg), current_row, current_col);
-            return result.parse().ok();
+        if formula_ref::quoted_literal(arg).is_some() {
+            return None;
         }
 
-        if let Some(val) = self.get_cell_value(arg) {
-            return Some(val);
-        }
-
-        arg.parse().ok()
+        self.evaluate_formula(arg, current_row, current_col)
+            .parse()
+            .ok()
     }
 
-    pub fn evaluate_arithmetic(&mut self, expr: &str) -> Result<f64, ()> {
-        let expr = expr.trim();
-
-        for (i, c) in expr.char_indices().rev() {
-            if c == '+' || c == '-' {
-                if i == 0 {
-                    continue;
-                }
-                let left = self.evaluate_arithmetic(&expr[..i]);
-                let right = self.evaluate_arithmetic(&expr[i + 1..]);
-                return Ok(if c == '+' { left? + right? } else { left? - right? });
-            }
+    fn evaluate_binary(
+        &mut self,
+        expr: &str,
+        operator: usize,
+        row: usize,
+        col: usize,
+    ) -> Option<f64> {
+        let left = self.evaluate_arg_as_number(&expr[..operator], row, col);
+        let right = self.evaluate_arg_as_number(&expr[operator + 1..], row, col);
+        let (left, right) = (left?, right?);
+        match expr.as_bytes()[operator] {
+            b'+' => Some(left + right),
+            b'-' => Some(left - right),
+            b'*' => Some(left * right),
+            b'/' => Some(left / right),
+            _ => None,
         }
-
-        for (i, c) in expr.char_indices().rev() {
-            if c == '*' || c == '/' {
-                let left = self.evaluate_arithmetic(&expr[..i]);
-                let right = self.evaluate_arithmetic(&expr[i + 1..]);
-                return Ok(if c == '*' { left? * right? } else { left? / right? });
-            }
-        }
-
-        if let Ok(n) = expr.parse::<f64>() {
-            return Ok(n);
-        }
-
-        if let Some(val) = self.get_cell_value(expr) {
-            return Ok(val);
-        }
-
-        Err(())
     }
 
     fn parse_cell_ref(&mut self, input: &str) -> Option<(usize, usize)> {
@@ -653,10 +648,8 @@ impl<'sheet> FormulaEvaluator<'sheet> {
                 AggregateInput::Cell(row, col) => {
                     !evaluator.raw_cell_with_dependency(row, col).is_empty()
                 }
-                AggregateInput::Scalar(arg) if arg.contains('(') => {
-                    !evaluator.evaluate_arg(arg, row, col).is_empty()
-                }
-                AggregateInput::Scalar(arg) => !arg.is_empty(),
+                AggregateInput::Scalar(arg) if formula_ref::quoted_literal(arg).is_some() => true,
+                AggregateInput::Scalar(arg) => !evaluator.evaluate_arg(arg, row, col).is_empty(),
             };
             if nonempty {
                 count += 1;
@@ -1534,9 +1527,10 @@ impl<'sheet> FormulaEvaluator<'sheet> {
         let value_if_error = parts[1].trim();
 
         // Try to evaluate the first argument as a formula if it contains operators or functions
-        let result = if value.contains('+') || value.contains('-') || value.contains('*') || value.contains('/') || value.contains('(') {
-            // It's an arithmetic expression or function, evaluate as formula
-            self.evaluate_formula(&format!("={}", value), current_row, current_col)
+        let result = if formula_ref::quoted_literal(value).is_none()
+            && (value.contains('(') || binary_operator(value).is_some())
+        {
+            self.evaluate_formula(value, current_row, current_col)
         } else {
             // Try as regular argument
             self.evaluate_arg(value, current_row, current_col)
@@ -1765,6 +1759,33 @@ mod tests {
         }
         assert_eq!(sheet.get_cell(0, functions.len()), "=SUM(IF(0,#REF!,7))");
         assert_eq!(sheet.evaluate_cell(0, functions.len()), "7");
+    }
+
+    #[test]
+    fn aggregate_scalar_arithmetic_shares_dependency_tracking() {
+        let mut sheet = Spreadsheet::new();
+        for (formula, result) in [
+            ("=SUM(1+A1)", "#CYCLE!"),
+            ("=COUNT(A1*2)", "#CYCLE!"),
+            ("=COUNTA(1/A1)", "#CYCLE!"),
+            ("=COUNT(ABS(1+A1))", "#CYCLE!"),
+            ("=SUM(1+ABS(A1))", "#CYCLE!"),
+            ("=SUM(IF(1,1+A1,7))", "#CYCLE!"),
+            ("=SUM(IF(0,1+A1,7))", "7"),
+            ("=SUM(1+#REF!)", "#REF!"),
+            ("=COUNT(#REF!*2)", "#REF!"),
+            ("=COUNTA(1/#REF!)", "#REF!"),
+            ("=SUM(1+2)", "3"),
+            ("=SUM(ABS(-2)+3*4-2/2)", "13"),
+            ("=SUM(1e-3)", "0.001"),
+            (r#"=SUM("1+A1",'1+#REF!',2)"#, "2"),
+            (r#"=SUM("before+A1+after"-2,2)"#, "2"),
+            (r#"=COUNTA("1+A1",'1+#REF!')"#, "2"),
+            (r#"=IFERROR("before+A1+after",7)"#, "before+A1+after"),
+        ] {
+            sheet.set_cell(0, 0, formula.into());
+            assert_eq!(sheet.evaluate_cell(0, 0), result, "{formula}");
+        }
     }
 
     #[test]

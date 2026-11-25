@@ -206,7 +206,10 @@ fn word_prefix(text: &str) -> &str {
     &text[..text.find(|ch| !is_word_char(ch)).unwrap_or(text.len())]
 }
 
-pub fn top_level_delimiters(text: &str, delimiter: u8) -> impl Iterator<Item = usize> + '_ {
+pub fn top_level_delimiters<'a>(
+    text: &'a str,
+    delimiters: &'a [u8],
+) -> impl Iterator<Item = usize> + 'a {
     let bytes = text.as_bytes();
     let mut cursor = 0;
     std::iter::from_fn(move || {
@@ -218,12 +221,25 @@ pub fn top_level_delimiters(text: &str, delimiter: u8) -> impl Iterator<Item = u
                 b'"' | b'\'' => cursor = quoted_end(text, index),
                 b'(' => depth += 1,
                 b')' => depth = depth.saturating_sub(1),
-                _ if byte == delimiter && depth == 0 => return Some(index),
+                _ if depth == 0 && delimiters.contains(&byte) => return Some(index),
                 _ => {}
             }
         }
         None
     })
+}
+
+pub fn quoted_literal(text: &str) -> Option<&str> {
+    let quote = *text.as_bytes().first()?;
+    if matches!(quote, b'"' | b'\'')
+        && text.len() >= 2
+        && text.as_bytes().last() == Some(&quote)
+        && quoted_end(text, 0) == text.len()
+    {
+        Some(&text[1..text.len() - 1])
+    } else {
+        None
+    }
 }
 
 fn quoted_end(text: &str, start: usize) -> usize {
