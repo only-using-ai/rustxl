@@ -14,22 +14,51 @@ use crate::types::{DataType, RowColumnSelectMode, SaveFormat, TextAlignment, Ver
 use crate::ui;
 use crate::update::{self, InstallResult, UpdateInfo, UpdateMessage};
 
+#[derive(Default)]
+struct ActiveInstall {
+    receiver: Option<Receiver<InstallResult>>,
+    quit_when_done: bool,
+}
+
+impl ActiveInstall {
+    fn defer_or_allow_quit(&mut self, spreadsheet: &mut Spreadsheet) -> bool {
+        if self.receiver.is_none() {
+            return true;
+        }
+
+        self.quit_when_done = true;
+        if spreadsheet.command_mode {
+            spreadsheet.exit_command_mode();
+        }
+        spreadsheet.update_message =
+            Some("Downloading update... xl will quit when it finishes.".into());
+        false
+    }
+
+    fn ready_for_deferred_quit(&self) -> bool {
+        self.quit_when_done && self.receiver.is_none()
+    }
+}
+
 pub fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     mut spreadsheet: Spreadsheet,
     update_rx: Receiver<UpdateMessage>,
-) -> io::Result<()> {
+) -> io::Result<Option<String>> {
     let mut clipboard = SystemClipboard::default();
-    let mut active_install = None;
+    let mut active_install = ActiveInstall::default();
 
     loop {
         poll_update_install(&mut spreadsheet, &mut active_install);
+        if active_install.ready_for_deferred_quit() {
+            return Ok(spreadsheet.update_message.take());
+        }
         // Check for update messages (non-blocking)
         if let Ok(msg) = update_rx.try_recv() {
             match msg {
                 UpdateMessage::Available(info) => {
                     spreadsheet.update_available = Some(info);
-                    if !spreadsheet.hide_update_prompt && active_install.is_none() {
+                    if !spreadsheet.hide_update_prompt && active_install.receiver.is_none() {
                         spreadsheet.update_prompt_shown = true;
                     }
                 }
@@ -72,7 +101,7 @@ pub fn run_app(
                         &mut active_install,
                         update::download_and_install,
                     ) {
-                        return Ok(());
+                        return Ok(None);
                     }
                 }
                 Ok(_) => {} // Ignore non-key events
@@ -97,7 +126,7 @@ fn handle_sheet_key(
     spreadsheet: &mut Spreadsheet,
     key: KeyEvent,
     clipboard: &mut impl ClipboardBackend,
-    active_install: &mut Option<Receiver<InstallResult>>,
+    active_install: &mut ActiveInstall,
     install: impl FnOnce(&UpdateInfo) -> Result<(), String> + Send + 'static,
 ) -> bool {
     if spreadsheet.update_prompt_shown
@@ -109,7 +138,8 @@ fn handle_sheet_key(
     if spreadsheet.editing {
         handle_editing_mode(spreadsheet, key.code, key.modifiers);
     } else if spreadsheet.command_mode {
-        return handle_command_mode(spreadsheet, key.code);
+        return handle_command_mode(spreadsheet, key.code)
+            && active_install.defer_or_allow_quit(spreadsheet);
     } else if spreadsheet.open_mode {
         handle_open_mode(spreadsheet, key.code);
     } else if spreadsheet.save_mode {
@@ -121,16 +151,17 @@ fn handle_sheet_key(
     } else if spreadsheet.find_mode {
         handle_find_mode(spreadsheet, key.code, key.modifiers, clipboard);
     } else {
-        return handle_ready_mode(spreadsheet, key.code, key.modifiers, clipboard);
+        return handle_ready_mode(spreadsheet, key.code, key.modifiers, clipboard)
+            && active_install.defer_or_allow_quit(spreadsheet);
     }
     false
 }
 
 fn poll_update_install(
     spreadsheet: &mut Spreadsheet,
-    active_install: &mut Option<Receiver<InstallResult>>,
+    active_install: &mut ActiveInstall,
 ) -> bool {
-    let Some(receiver) = active_install.as_ref() else {
+    let Some(receiver) = active_install.receiver.as_ref() else {
         return false;
     };
     let result = match receiver.try_recv() {
@@ -138,7 +169,7 @@ fn poll_update_install(
         Err(TryRecvError::Empty) => return false,
         Err(TryRecvError::Disconnected) => Err("Installer exited before reporting a result".into()),
     };
-    *active_install = None;
+    active_install.receiver = None;
     finish_update_install(spreadsheet, result);
     true
 }
@@ -157,10 +188,10 @@ fn finish_update_install(spreadsheet: &mut Spreadsheet, result: InstallResult) {
 fn handle_update_prompt(
     spreadsheet: &mut Spreadsheet,
     code: KeyCode,
-    active_install: &mut Option<Receiver<InstallResult>>,
+    active_install: &mut ActiveInstall,
     install: impl FnOnce(&UpdateInfo) -> Result<(), String> + Send + 'static,
 ) -> bool {
-    if active_install.is_some() {
+    if active_install.receiver.is_some() {
         return false;
     }
     match code {
@@ -168,7 +199,7 @@ fn handle_update_prompt(
             if let Some(info) = spreadsheet.update_available.clone() {
                 match update::spawn_update_install(info, install) {
                     Ok(receiver) => {
-                        *active_install = Some(receiver);
+                        active_install.receiver = Some(receiver);
                         spreadsheet.update_in_progress = true;
                         spreadsheet.update_prompt_shown = false;
                         spreadsheet.update_message = Some("Downloading update...".into());
@@ -953,19 +984,29 @@ mod tests {
     }
 
     #[test]
-    fn delayed_install_renders_progress_and_keeps_accepting_input() {
-        use std::sync::mpsc::channel;
+    fn delayed_install_keeps_input_responsive_and_defers_both_quit_keys() {
+        use std::sync::mpsc::{Sender, channel};
         use std::time::Instant;
 
-        for (outcome, expected) in [
-            (Ok(()), "Updated to v2.0.0!"),
+        struct Cleanup(Sender<()>);
+
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+
+        for (outcome, expected, quit_keys) in [
+            (Ok(()), "Updated to v2.0.0!", &[KeyCode::Char('q')][..]),
             (
                 Err("fixture copy failed".to_string()),
                 "Update failed: fixture copy failed",
+                &[KeyCode::Char(':'), KeyCode::Char('q'), KeyCode::Enter][..],
             ),
         ] {
             let (started_tx, started_rx) = channel();
             let (release_tx, release_rx) = channel();
+            let (cleaned_tx, cleaned_rx) = channel();
             let mut sheet = Spreadsheet::new();
             sheet.update_available = Some(UpdateInfo {
                 current_version: "v1.0.0".into(),
@@ -974,7 +1015,7 @@ mod tests {
                 asset_name: String::new(),
             });
             sheet.update_prompt_shown = true;
-            let mut active_install = None;
+            let mut active_install = ActiveInstall::default();
             let mut clipboard = OfflineClipboard;
             let mut terminal = Terminal::new(TestBackend::new(120, 20)).unwrap();
             let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
@@ -985,6 +1026,7 @@ mod tests {
                 &mut clipboard,
                 &mut active_install,
                 move |info| {
+                    let _cleanup = Cleanup(cleaned_tx);
                     assert_eq!(info.latest_version, "v2.0.0");
                     started_tx.send(()).unwrap();
                     release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -1020,13 +1062,40 @@ mod tests {
             assert!(sheet.update_in_progress);
             assert!(render_sheet(&mut terminal, &mut sheet).contains("Downloading update..."));
 
+            for &code in quit_keys {
+                assert!(!handle_sheet_key(
+                    &mut sheet,
+                    key(code),
+                    &mut clipboard,
+                    &mut active_install,
+                    |_| panic!("a quit key started an install"),
+                ));
+            }
+            assert!(active_install.quit_when_done);
+            assert!(!active_install.ready_for_deferred_quit());
+            assert!(!sheet.command_mode);
+            assert!(
+                render_sheet(&mut terminal, &mut sheet).contains("xl will quit when it finishes.")
+            );
+            assert_eq!(cleaned_rx.try_recv(), Err(TryRecvError::Empty));
+
+            assert!(!handle_sheet_key(
+                &mut sheet,
+                key(KeyCode::Right),
+                &mut clipboard,
+                &mut active_install,
+                |_| panic!("a navigation key started an install"),
+            ));
+            assert_eq!(sheet.cursor_col, 1);
+
             release_tx.send(()).unwrap();
             let deadline = Instant::now() + Duration::from_secs(5);
             while !poll_update_install(&mut sheet, &mut active_install) {
                 assert!(Instant::now() < deadline, "installer never completed");
                 std::thread::yield_now();
             }
-            assert!(active_install.is_none());
+            assert_eq!(cleaned_rx.try_recv(), Ok(()));
+            assert!(active_install.ready_for_deferred_quit());
             assert!(!sheet.update_in_progress && !sheet.update_prompt_shown);
             assert!(render_sheet(&mut terminal, &mut sheet).contains(expected));
         }
@@ -1035,13 +1104,16 @@ mod tests {
     #[test]
     fn disconnected_installer_reports_failure_and_clears_progress() {
         let (tx, rx) = std::sync::mpsc::channel();
-        let mut active_install = Some(rx);
+        let mut active_install = ActiveInstall {
+            receiver: Some(rx),
+            quit_when_done: true,
+        };
         let mut sheet = Spreadsheet::new();
         sheet.update_in_progress = true;
         drop(tx);
 
         assert!(poll_update_install(&mut sheet, &mut active_install));
-        assert!(active_install.is_none());
+        assert!(active_install.ready_for_deferred_quit());
         assert!(!sheet.update_in_progress);
         assert!(
             sheet

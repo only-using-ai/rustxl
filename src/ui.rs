@@ -1141,15 +1141,16 @@ fn render_ready_status<'a>(mode: &'a str, mode_style: Style) -> Line<'a> {
 
 fn render_update_bar(f: &mut Frame, spreadsheet: &Spreadsheet, terminal_area: Rect) {
     let text = if spreadsheet.update_in_progress {
+        let progress = spreadsheet
+            .update_message
+            .as_deref()
+            .unwrap_or("Downloading update...");
         Text::from(Line::from(vec![
             Span::styled(
                 " UPDATE ",
                 Style::default().bg(Color::Rgb(0, 150, 136)).fg(Color::White),
             ),
-            Span::styled(
-                "  Downloading update...",
-                Style::default().fg(Color::Yellow),
-            ),
+            Span::styled(format!("  {progress}"), Style::default().fg(Color::Yellow)),
         ]))
     } else if let Some(ref msg) = spreadsheet.update_message {
         // Show update result message
