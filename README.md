@@ -143,6 +143,13 @@ a file. Select `whitespace` to split command output that resembles CSV or TSV.
 | `Alt+Arrow` | Jump to data boundary |
 | `q` | Quit |
 
+Paste uses the current system clipboard. RustXL preserves cell styles when it
+recognizes its own copied data. With desktop clipboard access, Cut moves cells
+only when RustXL can verify that its clipboard entry is still current. The
+macOS adapter supports that check. On Linux and Windows, an unverified Cut
+prompts you to paste again as a copy. Cut also works within RustXL when there
+is no desktop clipboard connection.
+
 #### Edit Mode
 
 | Key | Action |
