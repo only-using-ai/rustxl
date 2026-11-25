@@ -107,8 +107,16 @@ xl --file spreadsheet.xlsx
 
 # Pipe data from another command
 ls -la | xl
-cat data.txt | xl
+cat data.csv | xl --stdin-format csv
+cat data.tsv | xl --stdin-format tsv
 ```
+
+Piped input defaults to `--stdin-format auto`. It looks for two or more fields
+with a consistent width across records and prefers TSV if both delimiters fit.
+Otherwise it splits command output on whitespace. Select `csv` or `tsv` for
+single-column or ambiguous data, or to receive the same parse errors as opening
+a file. Select `whitespace` to split command output that resembles CSV or TSV.
+`--file` opens a file directly and skips stdin.
 
 ### Keyboard Shortcuts
 

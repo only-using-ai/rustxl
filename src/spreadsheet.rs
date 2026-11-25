@@ -1,9 +1,10 @@
 use std::collections::HashMap;
+use std::io::{self, Read};
 
 use ratatui::layout::Rect;
 
 use crate::constants::{DEFAULT_COLS, DEFAULT_ROWS};
-use crate::types::{CellStyle, RowColumnSelectMode, SaveFormat, VisualSubMode};
+use crate::types::{CellStyle, RowColumnSelectMode, SaveFormat, StdinFormat, VisualSubMode};
 use crate::update::UpdateInfo;
 
 /// Represents copied/cut cell data with relative positions
@@ -1177,12 +1178,15 @@ impl Spreadsheet {
         *self = loaded;
     }
 
-    fn load_delimited(&mut self, source: impl std::io::Read, delimiter: u8) -> std::io::Result<()> {
-        let mut reader = csv::ReaderBuilder::new()
+    fn delimited_reader<R: Read>(source: R, delimiter: u8) -> csv::Reader<R> {
+        csv::ReaderBuilder::new()
             .delimiter(delimiter)
             .has_headers(false)
-            .from_reader(source);
+            .from_reader(source)
+    }
 
+    fn load_delimited(&mut self, source: impl Read, delimiter: u8) -> io::Result<()> {
+        let mut reader = Self::delimited_reader(source, delimiter);
         for (row_idx, result) in reader.records().enumerate() {
             let record = result?;
             for (col_idx, field) in record.iter().enumerate() {
@@ -1251,41 +1255,51 @@ impl Spreadsheet {
         Ok(())
     }
 
-    /// Load spreadsheet data from a byte buffer (e.g., from piped stdin)
-    pub fn load_from_buffer(&mut self, buffer: &[u8]) -> std::io::Result<()> {
-        // Convert to string for processing
-        let buffer_str = String::from_utf8_lossy(buffer);
-        
-        self.cells.clear();
-        let mut row_idx = 0;
-        
-        // Process the buffered data line by line
-        for line in buffer_str.lines() {
-            let trimmed = line.trim();
-            
-            // Skip empty lines
-            if trimmed.is_empty() {
-                continue;
-            }
-            
-            // Split by whitespace (handles multiple spaces/tabs)
-            let parts: Vec<&str> = trimmed.split_whitespace().collect();
-            
-            for (col_idx, part) in parts.iter().enumerate() {
-                if !part.is_empty() {
-                    self.set_cell(row_idx, col_idx, part.to_string());
+    pub fn load_from_buffer(&mut self, buffer: &[u8], format: StdinFormat) -> io::Result<()> {
+        let delimiter = match format {
+            // Prefer TSV when both delimiters yield consistent records.
+            StdinFormat::Auto => [b'\t', b',']
+                .into_iter()
+                .find(|&delimiter| Self::looks_delimited(buffer, delimiter)),
+            StdinFormat::Csv => Some(b','),
+            StdinFormat::Tsv => Some(b'\t'),
+            StdinFormat::Whitespace => None,
+        };
+
+        let mut loaded = Self::new();
+        if let Some(delimiter) = delimiter {
+            loaded.load_delimited(buffer, delimiter)?;
+        } else {
+            let text = String::from_utf8_lossy(buffer);
+            for (row, line) in text
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .enumerate()
+            {
+                for (col, value) in line.split_whitespace().enumerate() {
+                    loaded.set_cell(row, col, value.to_owned());
                 }
             }
-            
-            row_idx += 1;
         }
-        
-        // Update dimensions based on loaded data
-        let (max_row, max_col) = self.get_data_bounds();
-        self.num_rows = (max_row + 1).max(DEFAULT_ROWS);
-        self.num_cols = (max_col + 1).max(DEFAULT_COLS);
-        
+        self.replace_document(loaded);
         Ok(())
+    }
+
+    fn looks_delimited(buffer: &[u8], delimiter: u8) -> bool {
+        let mut reader = Self::delimited_reader(buffer, delimiter);
+        let mut record = csv::ByteRecord::new();
+        if !matches!(reader.read_byte_record(&mut record), Ok(true)) || record.len() < 2 {
+            return false;
+        }
+
+        // The reader rejects records whose field counts differ from the first.
+        loop {
+            match reader.read_byte_record(&mut record) {
+                Ok(true) => continue,
+                Ok(false) => return true,
+                Err(_) => return false,
+            }
+        }
     }
 }
 
@@ -1354,7 +1368,7 @@ mod tests {
         let mut sheet = Spreadsheet::new();
         let data = b"hello world\nfoo bar baz";
         
-        sheet.load_from_buffer(data).unwrap();
+        sheet.load_from_buffer(data, StdinFormat::Auto).unwrap();
         
         assert_eq!(sheet.get_cell(0, 0), "hello");
         assert_eq!(sheet.get_cell(0, 1), "world");
@@ -1369,7 +1383,7 @@ mod tests {
         // Multiple spaces and tabs between fields
         let data = b"col1    col2\tcol3\n  value1   value2  ";
         
-        sheet.load_from_buffer(data).unwrap();
+        sheet.load_from_buffer(data, StdinFormat::Auto).unwrap();
         
         assert_eq!(sheet.get_cell(0, 0), "col1");
         assert_eq!(sheet.get_cell(0, 1), "col2");
@@ -1383,7 +1397,7 @@ mod tests {
         let mut sheet = Spreadsheet::new();
         let data = b"line1\n\n\nline2\n   \nline3";
         
-        sheet.load_from_buffer(data).unwrap();
+        sheet.load_from_buffer(data, StdinFormat::Auto).unwrap();
         
         assert_eq!(sheet.get_cell(0, 0), "line1");
         assert_eq!(sheet.get_cell(1, 0), "line2");
@@ -1398,7 +1412,7 @@ mod tests {
 drwxr-xr-x  3 user group  96 Jan 23 14:20 .git
 -rw-r--r--  1 user group 500 Jan 23 14:20 Cargo.toml";
         
-        sheet.load_from_buffer(data).unwrap();
+        sheet.load_from_buffer(data, StdinFormat::Auto).unwrap();
         
         // First line: "total 120"
         assert_eq!(sheet.get_cell(0, 0), "total");
@@ -1418,7 +1432,7 @@ drwxr-xr-x  3 user group  96 Jan 23 14:20 .git
         let mut sheet = Spreadsheet::new();
         let data = b"";
         
-        sheet.load_from_buffer(data).unwrap();
+        sheet.load_from_buffer(data, StdinFormat::Auto).unwrap();
         
         // Should have default dimensions but no data
         assert!(sheet.num_rows >= DEFAULT_ROWS);
@@ -1431,11 +1445,33 @@ drwxr-xr-x  3 user group  96 Jan 23 14:20 .git
         let mut sheet = Spreadsheet::new();
         let data = "héllo wörld\n日本語 テスト".as_bytes();
         
-        sheet.load_from_buffer(data).unwrap();
+        sheet.load_from_buffer(data, StdinFormat::Auto).unwrap();
         
         assert_eq!(sheet.get_cell(0, 0), "héllo");
         assert_eq!(sheet.get_cell(0, 1), "wörld");
         assert_eq!(sheet.get_cell(1, 0), "日本語");
         assert_eq!(sheet.get_cell(1, 1), "テスト");
+    }
+
+    #[test]
+    fn auto_prefers_tsv_when_both_delimiters_fit() {
+        let mut sheet = Spreadsheet::new();
+        sheet
+            .load_from_buffer(b"a,b\tc,d\nx,y\tz,w\n", StdinFormat::Auto)
+            .unwrap();
+        assert_eq!(sheet.get_cell(0, 0), "a,b");
+        assert_eq!(sheet.get_cell(0, 1), "c,d");
+        assert_eq!(sheet.get_cell(1, 0), "x,y");
+        assert_eq!(sheet.get_cell(1, 1), "z,w");
+    }
+
+    #[test]
+    fn whitespace_can_be_selected_when_delimiters_look_consistent() {
+        let mut sheet = Spreadsheet::new();
+        sheet
+            .load_from_buffer(b"first,last extra\n", StdinFormat::Whitespace)
+            .unwrap();
+        assert_eq!(sheet.get_cell(0, 0), "first,last");
+        assert_eq!(sheet.get_cell(0, 1), "extra");
     }
 }

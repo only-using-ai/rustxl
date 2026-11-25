@@ -56,6 +56,14 @@ pub enum SaveFormat {
     Tsv,
 }
 
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum StdinFormat {
+    Auto,
+    Csv,
+    Tsv,
+    Whitespace,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum RowColumnSelectMode {
     None,
