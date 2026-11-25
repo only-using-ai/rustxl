@@ -63,6 +63,10 @@ pub(crate) fn export_token() -> String {
 
 pub(crate) use platform::SystemClipboard;
 
+#[cfg(windows)]
+#[path = "clipboard/windows.rs"]
+mod platform;
+
 #[cfg(target_os = "macos")]
 mod platform {
     use objc2::rc::{Retained, autoreleasepool};
@@ -182,7 +186,7 @@ mod platform {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 mod platform {
     use super::{AccessError, ClipboardBackend, ClipboardText, Generation, Publication};
 
@@ -506,6 +510,30 @@ mod tests {
         assert_eq!(sheet.get_cell(0, 0), "original");
         assert_eq!(sheet.get_cell(0, 1), "original");
         assert!(sheet.get_cell_style(0, 1).bold);
+    }
+
+    #[test]
+    fn an_unavailable_generation_on_either_side_allows_only_styled_copy() {
+        for (published, observed) in [(None, Some(1)), (Some(0), None)] {
+            let mut clipboard = FakeClipboard {
+                generation: published,
+                ..FakeClipboard::default()
+            };
+            let mut sheet = formatted_source();
+            sheet.cut_selection(&mut clipboard);
+            clipboard.generation = observed;
+            sheet.cursor_col = 1;
+
+            sheet.paste(&mut clipboard);
+            assert_eq!(sheet.get_cell(0, 0), "original");
+            assert_eq!(sheet.get_cell(0, 1), "");
+            assert!(sheet.clipboard_message.is_some());
+
+            sheet.paste(&mut clipboard);
+            assert_eq!(sheet.get_cell(0, 0), "original");
+            assert_eq!(sheet.get_cell(0, 1), "original");
+            assert!(sheet.get_cell_style(0, 1).bold);
+        }
     }
 
     #[test]

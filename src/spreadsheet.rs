@@ -61,12 +61,17 @@ impl ClipboardData {
     fn matches_export(&self, entry: &ClipboardText, observed: Option<Generation>) -> bool {
         match &self.export {
             ClipboardExport::Published { token, generation } => {
-                *generation == observed
+                (generation.is_none() || observed.is_none() || *generation == observed)
                     && entry.token.as_ref() == Some(token)
                     && self.plain_text() == entry.text
             }
             _ => false,
         }
+    }
+
+    fn owns_publication(&self, observed: Option<Generation>) -> bool {
+        matches!(self.export, ClipboardExport::Published { generation: Some(generation), .. }
+            if Some(generation) == observed)
     }
 }
 
@@ -415,7 +420,8 @@ impl Spreadsheet {
                 if let Some(snapshot) =
                     snapshot.filter(|data| data.matches_export(&entry, generation))
                 {
-                    self.paste_snapshot(snapshot, generation.is_some());
+                    let can_move = snapshot.owns_publication(generation);
+                    self.paste_snapshot(snapshot, can_move);
                 } else {
                     self.paste_text(&entry.text);
                 }

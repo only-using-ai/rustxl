@@ -17,3 +17,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --locked
+      - name: Verify native clipboard ownership
+        if: runner.os == 'Windows'
+        run: cargo test --locked clipboard::platform::windows_clipboard_moves_only_the_current_publication -- --ignored --exact
