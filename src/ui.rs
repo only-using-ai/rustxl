@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -13,7 +15,7 @@ use crate::constants::{
     DARK_GRID_COLOR, DARK_HEADER_BG, DARK_HEADER_FG, DARK_REF_RANGE_BG, DARK_REF_SELECTION_BG,
     DARK_SELECTED_BG, DARK_SELECTED_HEADER_BG, DARK_FIND_MATCH_BG,
 };
-use crate::spreadsheet::Spreadsheet;
+use crate::{shell::ShellStep, spreadsheet::Spreadsheet};
 use crate::types::{DataType, RowColumnSelectMode, SaveFormat, TextAlignment, VerticalAlignment, VisualSubMode};
 
 fn format_cell_by_type(value: &str, data_type: DataType) -> String {
@@ -66,6 +68,12 @@ fn format_cell_by_type(value: &str, data_type: DataType) -> String {
 
 pub fn render(f: &mut Frame, spreadsheet: &mut Spreadsheet) {
     let area = f.area();
+
+    if let Some(prompt) = &mut spreadsheet.shell_prompt {
+        prompt.can_confirm = false;
+        render_shell_prompt(f, spreadsheet, area);
+        return;
+    }
 
     // Check if we have selection stats to show
     let has_stats = spreadsheet.get_selection_stats().is_some();
@@ -139,6 +147,101 @@ pub fn render(f: &mut Frame, spreadsheet: &mut Spreadsheet) {
     if has_update {
         render_update_bar(f, spreadsheet, area);
     }
+}
+
+fn render_shell_prompt(f: &mut Frame, spreadsheet: &mut Spreadsheet, area: Rect) {
+    let Some(prompt) = &spreadsheet.shell_prompt else {
+        return;
+    };
+    let (title, text, controls) = match &prompt.step {
+        ShellStep::Run { row, col, command } => (
+            format!("Run SHELL in {}{}", Spreadsheet::col_name(*col), row + 1),
+            Cow::Borrowed(command.as_str()),
+            "r Run   ↑/↓ Scroll   Esc Cancel",
+        ),
+        ShellStep::Apply(output) => {
+            let range = output.range();
+            let (writes, occupied) = output.counts(spreadsheet);
+            (
+                "Apply SHELL output".to_string(),
+                Cow::Owned(format!(
+                    "Destination range {range}\nCells to write {writes}\nOccupied cells to overwrite {occupied}"
+                )),
+                "a Apply   Esc Cancel",
+            )
+        }
+        ShellStep::Message(message) => (
+            "SHELL result".to_string(),
+            Cow::Borrowed(message.as_str()),
+            "↑/↓ Scroll   Esc Close",
+        ),
+    };
+    let title_width = Span::raw(title.as_str()).width();
+    let block = Block::default().borders(Borders::ALL).title(title);
+    let inner = block.inner(area);
+    let footer = shell_preview_lines(controls, inner.width.into());
+    let height = usize::from(inner.height).saturating_sub(footer.len());
+    let lines = if height > 0 && usize::from(inner.width) >= title_width {
+        shell_preview_lines(&text, inner.width.into())
+    } else {
+        Vec::new()
+    };
+    if lines.is_empty() || (matches!(prompt.step, ShellStep::Apply(_)) && lines.len() > height) {
+        f.render_widget(
+            Paragraph::new("Resize to review SHELL. Esc closes.").wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
+
+    f.render_widget(block, area);
+    let [body_area, footer_area] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(footer.len() as u16)]).areas(inner);
+    let scroll = prompt.scroll.min(lines.len().saturating_sub(height));
+    let visible = lines
+        .into_iter()
+        .skip(scroll)
+        .take(height)
+        .map(Line::raw)
+        .collect::<Vec<_>>();
+    f.render_widget(Paragraph::new(visible), body_area);
+    f.render_widget(
+        Paragraph::new(footer.into_iter().map(Line::raw).collect::<Vec<_>>())
+            .style(Style::default().fg(Color::Yellow)),
+        footer_area,
+    );
+    if let Some(prompt) = &mut spreadsheet.shell_prompt {
+        prompt.scroll = scroll;
+        prompt.can_confirm = !matches!(prompt.step, ShellStep::Message(_));
+    }
+}
+
+fn shell_preview_lines(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    for line in text.split('\n') {
+        // Make terminal control characters inspectable, including tabs and CR.
+        let mut escaped = String::new();
+        for ch in line.chars() {
+            if ch.is_control() {
+                escaped.extend(ch.escape_default());
+            } else {
+                escaped.push(ch);
+            }
+        }
+        let mut current = String::new();
+        let mut used = 0;
+        for grapheme in Span::raw(escaped).styled_graphemes(Style::default()) {
+            let width_needed = Span::raw(grapheme.symbol).width();
+            if used > 0 && used + width_needed > width {
+                lines.push(std::mem::take(&mut current));
+                used = 0;
+            }
+            current.push_str(grapheme.symbol);
+            used += width_needed;
+        }
+        lines.push(current);
+    }
+    lines
 }
 
 fn render_formula_bar(f: &mut Frame, spreadsheet: &Spreadsheet, area: Rect) {
@@ -339,10 +442,7 @@ fn render_grid(
             }
 
             let is_cursor = row == spreadsheet.cursor_row && col == spreadsheet.cursor_col;
-            let evaluated = {
-                // Evaluate cell - this may modify the spreadsheet for SHELL formulas
-                spreadsheet.evaluate_cell(row, col)
-            };
+            let evaluated = spreadsheet.evaluate_cell(row, col);
 
             let cell_style = spreadsheet.get_cell_style(row, col);
             
@@ -718,7 +818,7 @@ fn render_command_status<'a>(spreadsheet: &Spreadsheet, mode: &'a str, mode_styl
         Span::styled(" execute  ", Style::default().fg(Color::DarkGray)),
         Span::styled("Esc", Style::default().fg(Color::Yellow)),
         Span::styled(" cancel  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("(e.g. A1, B23, q)", Style::default().fg(Color::Cyan)),
+        Span::styled("(e.g. A1, run, q)", Style::default().fg(Color::Cyan)),
         if !msg.is_empty() {
             Span::styled(format!("  {}", msg), Style::default().fg(Color::Red))
         } else {

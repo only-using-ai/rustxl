@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use ratatui::layout::Rect;
 
 use crate::constants::{DEFAULT_COLS, DEFAULT_ROWS};
+use crate::shell::ShellPrompt;
 use crate::types::{CellStyle, RowColumnSelectMode, SaveFormat, VisualSubMode};
 use crate::update::UpdateInfo;
 
@@ -69,6 +70,7 @@ pub struct Spreadsheet {
     pub command_mode: bool,
     pub command_buffer: String,
     pub command_message: Option<String>,
+    pub shell_prompt: Option<ShellPrompt>,
     // Update mode
     pub update_available: Option<UpdateInfo>,
     pub update_prompt_shown: bool,
@@ -126,6 +128,7 @@ impl Spreadsheet {
             command_mode: false,
             command_buffer: String::new(),
             command_message: None,
+            shell_prompt: None,
             update_available: None,
             update_prompt_shown: false,
             update_in_progress: false,
@@ -202,6 +205,14 @@ impl Spreadsheet {
         // Check if it's a quit command
         if cmd == "Q" || cmd == "QUIT" {
             return true; // Signal to quit
+        }
+
+        if cmd == "RUN" {
+            match self.begin_shell_run() {
+                Ok(()) => self.exit_command_mode(),
+                Err(message) => self.command_message = Some(message.to_string()),
+            }
+            return false;
         }
 
         // Try to parse as cell reference

@@ -3,6 +3,7 @@ mod formula;
 mod input;
 mod save;
 mod settings;
+mod shell;
 mod spreadsheet;
 mod style;
 mod types;
