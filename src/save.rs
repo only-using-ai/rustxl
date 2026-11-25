@@ -10,9 +10,23 @@ use crate::types::SaveFormat;
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
-fn destination_permissions(path: &Path) -> io::Result<Option<Permissions>> {
+fn writable_destination_permissions(path: &Path) -> io::Result<Option<Permissions>> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.is_file() => Ok(Some(metadata.permissions())),
+        Ok(metadata) if metadata.is_file() => {
+            // Rename checks directory permissions. Confirm write access to the file as well.
+            let mut options = OpenOptions::new();
+            options.write(true);
+            #[cfg(unix)]
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY);
+            let opened = options.open(path)?.metadata()?;
+            if !opened.is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Save destination must be a regular file",
+                ));
+            }
+            Ok(Some(opened.permissions()))
+        }
         Ok(metadata) if metadata.is_symlink() => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "Cannot save over a symbolic link",
@@ -47,12 +61,12 @@ fn save_atomically(
     destination: &Path,
     write: impl FnOnce(&mut File) -> io::Result<()>,
 ) -> io::Result<()> {
-    destination_permissions(destination)?;
+    writable_destination_permissions(destination)?;
     let (staging_path, mut staged) = create_staging_file(destination)?;
 
     let result = (|| {
         write(&mut staged)?;
-        if let Some(permissions) = destination_permissions(destination)? {
+        if let Some(permissions) = writable_destination_permissions(destination)? {
             #[cfg(windows)]
             if permissions.readonly() {
                 return Err(io::Error::new(
@@ -372,6 +386,37 @@ mod tests {
             0o600
         );
         assert_eq!(fs::read(&path).unwrap(), b"replacement");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn write_denial_keeps_destination_and_cleans_up() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = TestDirectory::new();
+        let path = directory.0.join("data.csv");
+        fs::write(&path, b"original").unwrap();
+        fs::set_permissions(&path, Permissions::from_mode(0o444)).unwrap();
+
+        match OpenOptions::new().write(true).open(&path) {
+            Ok(_) => return, // A privileged test runner can bypass the mode check.
+            Err(error) => assert_eq!(error.kind(), io::ErrorKind::PermissionDenied),
+        }
+        let error =
+            save_atomically(&path, |_| panic!("saved without write permission")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(fs::read(&path).unwrap(), b"original");
+        assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 1);
+
+        fs::set_permissions(&path, Permissions::from_mode(0o600)).unwrap();
+        let error = save_atomically(&path, |file| {
+            file.write_all(b"replacement")?;
+            fs::set_permissions(&path, Permissions::from_mode(0o444))
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(fs::read(&path).unwrap(), b"original");
+        assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 1);
     }
 
     #[test]
