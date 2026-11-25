@@ -1,19 +1,77 @@
-use crate::{shell, spreadsheet::Spreadsheet};
+use std::{borrow::Cow, collections::HashSet};
+
+use crate::{formula_ref, shell, spreadsheet::Spreadsheet};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FormulaError {
+    Cycle,
+    Reference,
+}
+
+impl FormulaError {
+    fn display(self) -> String {
+        match self {
+            Self::Cycle => "#CYCLE!".to_string(),
+            Self::Reference => formula_ref::ERROR.to_string(),
+        }
+    }
+}
+
+struct FormulaEvaluator<'a> {
+    sheet: &'a Spreadsheet,
+    active_cells: HashSet<(usize, usize)>,
+    // Numeric and range helpers use Option for normal nonnumeric values. Keep
+    // a formula error separately so their callers cannot silently treat it as blank.
+    error: Option<FormulaError>,
+}
 
 impl Spreadsheet {
-    pub fn evaluate_cell(&mut self, row: usize, col: usize) -> String {
-        let content = self.get_cell(row, col).to_string();
-        if content.starts_with('=') {
-            self.evaluate_formula(&content, row, col)
-        } else {
-            content
+    pub fn evaluate_cell(&self, row: usize, col: usize) -> String {
+        FormulaEvaluator::new(self).evaluate_cell(row, col)
+    }
+
+    #[cfg(test)]
+    pub fn evaluate_formula(&self, formula: &str, row: usize, col: usize) -> String {
+        FormulaEvaluator::new(self).evaluate_formula(formula, row, col)
+    }
+}
+
+impl<'sheet> FormulaEvaluator<'sheet> {
+    fn new(sheet: &'sheet Spreadsheet) -> Self {
+        Self {
+            sheet,
+            active_cells: HashSet::new(),
+            error: None,
         }
     }
 
-    pub fn evaluate_formula(&mut self, formula: &str, row: usize, col: usize) -> String {
-        let expr = formula.strip_prefix('=').unwrap_or(formula).trim();
-        let expr_upper = expr.to_uppercase();
+    fn evaluate_cell(&mut self, row: usize, col: usize) -> String {
+        if let Some(error) = self.error {
+            return error.display();
+        }
+        let content = self.sheet.get_cell(row, col);
+        if !content.starts_with('=') {
+            return content.to_string();
+        }
+        if !self.active_cells.insert((row, col)) {
+            self.error = Some(FormulaError::Cycle);
+            return FormulaError::Cycle.display();
+        }
+        let result = self.evaluate_formula(content, row, col);
+        self.active_cells.remove(&(row, col));
+        result
+    }
 
+    fn evaluate_formula(&mut self, formula: &str, row: usize, col: usize) -> String {
+        if let Some(error) = self.error {
+            return error.display();
+        }
+        let result = self.evaluate_expression(formula, row, col);
+        self.error.map_or(result, FormulaError::display)
+    }
+
+    fn evaluate_expression(&mut self, formula: &str, row: usize, col: usize) -> String {
+        let expr = formula.strip_prefix('=').unwrap_or(formula).trim();
         if let Some(args) = shell::shell_args(expr) {
             return if shell::shell_command(args).is_some() {
                 "[SHELL]".to_string()
@@ -21,6 +79,7 @@ impl Spreadsheet {
                 "#ERROR".to_string()
             };
         }
+        let expr_upper = expr.to_uppercase();
 
         // Handle SUM function (case-insensitive)
         if expr_upper.starts_with("SUM(") && expr_upper.ends_with(')') {
@@ -73,19 +132,19 @@ impl Spreadsheet {
         // Handle COUNTIF function (case-insensitive)
         if expr_upper.starts_with("COUNTIF(") && expr_upper.ends_with(')') {
             let inner = &expr[8..expr.len() - 1];
-            return self.evaluate_countif(inner, row, col);
+            return self.evaluate_countif(inner);
         }
 
         // Handle SUMIF function (case-insensitive)
         if expr_upper.starts_with("SUMIF(") && expr_upper.ends_with(')') {
             let inner = &expr[6..expr.len() - 1];
-            return self.evaluate_sumif(inner, row, col);
+            return self.evaluate_sumif(inner);
         }
 
         // Handle AVERAGEIF function (case-insensitive)
         if expr_upper.starts_with("AVERAGEIF(") && expr_upper.ends_with(')') {
             let inner = &expr[10..expr.len() - 1];
-            return self.evaluate_averageif(inner, row, col);
+            return self.evaluate_averageif(inner);
         }
 
         // Handle ROUND function (case-insensitive)
@@ -608,17 +667,17 @@ impl Spreadsheet {
                 if i == 0 {
                     continue;
                 }
-                let left = self.evaluate_arithmetic(&expr[..i])?;
-                let right = self.evaluate_arithmetic(&expr[i + 1..])?;
-                return Ok(if c == '+' { left + right } else { left - right });
+                let left = self.evaluate_arithmetic(&expr[..i]);
+                let right = self.evaluate_arithmetic(&expr[i + 1..]);
+                return Ok(if c == '+' { left? + right? } else { left? - right? });
             }
         }
 
         for (i, c) in expr.char_indices().rev() {
             if c == '*' || c == '/' {
-                let left = self.evaluate_arithmetic(&expr[..i])?;
-                let right = self.evaluate_arithmetic(&expr[i + 1..])?;
-                return Ok(if c == '*' { left * right } else { left / right });
+                let left = self.evaluate_arithmetic(&expr[..i]);
+                let right = self.evaluate_arithmetic(&expr[i + 1..]);
+                return Ok(if c == '*' { left? * right? } else { left? / right? });
             }
         }
 
@@ -633,30 +692,20 @@ impl Spreadsheet {
         Err(())
     }
 
-    pub fn parse_cell_ref(&self, cell_ref: &str) -> Option<(usize, usize)> {
-        let cell_ref = cell_ref.trim().to_uppercase();
-        let mut col_str = String::new();
-        let mut row_str = String::new();
-
-        for c in cell_ref.chars() {
-            if c.is_ascii_alphabetic() {
-                col_str.push(c);
-            } else if c.is_ascii_digit() {
-                row_str.push(c);
-            }
+    fn parse_cell_ref(&mut self, input: &str) -> Option<(usize, usize)> {
+        let input = input.trim();
+        if input.eq_ignore_ascii_case(formula_ref::ERROR) {
+            self.error.get_or_insert(FormulaError::Reference);
         }
+        formula_ref::CellReference::parse(input).map(|cell| (cell.row, cell.col))
+    }
 
-        if col_str.is_empty() || row_str.is_empty() {
-            return None;
+    fn raw_cell_with_dependency(&mut self, row: usize, col: usize) -> &'sheet str {
+        let content = self.sheet.get_cell(row, col);
+        if content.starts_with('=') {
+            self.evaluate_cell(row, col);
         }
-
-        let col = col_str
-            .chars()
-            .fold(0, |acc, c| acc * 26 + (c as usize - 'A' as usize + 1))
-            - 1;
-        let row = row_str.parse::<usize>().ok()? - 1;
-
-        Some((row, col))
+        content
     }
 
     pub fn get_cell_value(&mut self, cell_ref: &str) -> Option<f64> {
@@ -718,7 +767,7 @@ impl Spreadsheet {
                     let max_col = sc.max(ec);
                     for row in min_row..=max_row {
                         for col in min_col..=max_col {
-                            if !self.get_cell(row, col).is_empty() {
+                            if !self.raw_cell_with_dependency(row, col).is_empty() {
                                 count += 1;
                             }
                         }
@@ -728,7 +777,7 @@ impl Spreadsheet {
                 }
             } else {
                 let cell_content = if let Some((row, col)) = self.parse_cell_ref(arg) {
-                    self.get_cell(row, col)
+                    self.raw_cell_with_dependency(row, col)
                 } else {
                     arg
                 };
@@ -741,22 +790,22 @@ impl Spreadsheet {
         format!("{}", count)
     }
 
-    pub fn evaluate_countif(&mut self, args: &str, current_row: usize, current_col: usize) -> String {
+    fn evaluate_countif(&mut self, args: &str) -> String {
         let parts = self.split_function_args(args);
         if parts.len() != 2 {
             return "#ERROR".to_string();
         }
 
         let range = parts[0].trim();
-        let criteria = parts[1].trim();
+        let criteria = self.resolve_criteria(parts[1]);
 
         let mut count = 0;
 
         // Collect all cells from the range
         let cells = self.collect_range_cells(range);
         for (row, col) in cells {
-            let cell_value = self.get_cell(row, col).to_string();
-            if self.cell_matches_criteria(&cell_value, criteria, current_row, current_col) {
+            let cell_value = self.raw_cell_with_dependency(row, col).to_string();
+            if self.cell_matches_criteria(&cell_value, &criteria) {
                 count += 1;
             }
         }
@@ -764,19 +813,23 @@ impl Spreadsheet {
         format!("{}", count)
     }
 
-    pub fn evaluate_sumif(&mut self, args: &str, current_row: usize, current_col: usize) -> String {
+    fn evaluate_sumif(&mut self, args: &str) -> String {
         let parts = self.split_function_args(args);
         if parts.len() < 2 || parts.len() > 3 {
             return "#ERROR".to_string();
         }
 
         let range = parts[0].trim();
-        let criteria = parts[1].trim();
+        let criteria = self.resolve_criteria(parts[1]);
         let sum_range = if parts.len() == 3 {
             Some(parts[2].trim())
         } else {
             None
         };
+        if sum_range.is_some_and(|range| range.eq_ignore_ascii_case(formula_ref::ERROR)) {
+            self.error.get_or_insert(FormulaError::Reference);
+            return formula_ref::ERROR.to_string();
+        }
 
         // Handle ranges the same way COUNTIF does - iterate directly
         let mut sum = 0.0;
@@ -842,8 +895,8 @@ impl Spreadsheet {
                 let mut criteria_idx = 0;
                 for row in min_row..=max_row {
                     for col in min_col..=max_col {
-                        let cell_value = self.get_cell(row, col).to_string();
-                        if self.cell_matches_criteria(&cell_value, criteria, current_row, current_col) {
+                        let cell_value = self.raw_cell_with_dependency(row, col).to_string();
+                        if self.cell_matches_criteria(&cell_value, &criteria) {
                             if let Some((sum_row, sum_col)) = sum_cells.get(criteria_idx) {
                                 if let Some(val) = self.get_cell_value_at(*sum_row, *sum_col) {
                                     sum += val;
@@ -858,8 +911,8 @@ impl Spreadsheet {
             }
         } else if let Some((row, col)) = self.parse_cell_ref(range) {
             // Single cell range
-            let cell_value = self.get_cell(row, col).to_string();
-            if self.cell_matches_criteria(&cell_value, criteria, current_row, current_col) {
+            let cell_value = self.raw_cell_with_dependency(row, col).to_string();
+            if self.cell_matches_criteria(&cell_value, &criteria) {
                 if let Some(sr) = sum_range {
                     if let Some((sum_row, sum_col)) = self.parse_cell_ref(sr) {
                         if let Some(val) = self.get_cell_value_at(sum_row, sum_col) {
@@ -879,14 +932,14 @@ impl Spreadsheet {
         format!("{}", sum)
     }
 
-    pub fn evaluate_averageif(&mut self, args: &str, current_row: usize, current_col: usize) -> String {
+    fn evaluate_averageif(&mut self, args: &str) -> String {
         let parts = self.split_function_args(args);
         if parts.len() < 2 || parts.len() > 3 {
             return "#ERROR".to_string();
         }
 
         let range = parts[0].trim();
-        let criteria = parts[1].trim();
+        let criteria = self.resolve_criteria(parts[1]);
         let avg_range = if parts.len() == 3 {
             Some(parts[2].trim())
         } else {
@@ -910,8 +963,8 @@ impl Spreadsheet {
         }
 
         for (i, (row, col)) in criteria_cells.iter().enumerate() {
-            let cell_value = self.get_cell(*row, *col).to_string();
-            if self.cell_matches_criteria(&cell_value, criteria, current_row, current_col) {
+            let cell_value = self.raw_cell_with_dependency(*row, *col).to_string();
+            if self.cell_matches_criteria(&cell_value, &criteria) {
                 if let Some((avg_row, avg_col)) = avg_cells.get(i) {
                     if let Some(val) = self.get_cell_value_at(*avg_row, *avg_col) {
                         sum += val;
@@ -1159,7 +1212,7 @@ impl Spreadsheet {
 
         for (row, col) in &table_cells {
             if *col == target_col {
-                let cell_value = self.get_cell(*row, *col);
+                let cell_value = self.raw_cell_with_dependency(*row, *col);
                 if range_lookup {
                     // Approximate match - find the largest value <= lookup_value
                     if let Some(cell_num) = cell_value.parse::<f64>().ok() {
@@ -1199,7 +1252,7 @@ impl Spreadsheet {
         }
     }
 
-    fn collect_range_cells(&self, range: &str) -> Vec<(usize, usize)> {
+    fn collect_range_cells(&mut self, range: &str) -> Vec<(usize, usize)> {
         let mut cells = Vec::new();
         let range = range.trim();
 
@@ -1226,7 +1279,16 @@ impl Spreadsheet {
         cells
     }
 
-    fn cell_matches_criteria(&self, cell_value: &str, criteria: &str, _current_row: usize, _current_col: usize) -> bool {
+    fn resolve_criteria<'arg>(&mut self, criterion: &'arg str) -> Cow<'arg, str> {
+        let criterion = criterion.trim();
+        if let Some((row, col)) = self.parse_cell_ref(criterion) {
+            Cow::Owned(self.evaluate_cell(row, col))
+        } else {
+            Cow::Borrowed(criterion)
+        }
+    }
+
+    fn cell_matches_criteria(&self, cell_value: &str, criteria: &str) -> bool {
         let criteria = criteria.trim();
 
         // Remove quotes if present
@@ -1602,6 +1664,11 @@ impl Spreadsheet {
             self.evaluate_arg(value, current_row, current_col)
         };
         
+        if self.error == Some(FormulaError::Cycle) {
+            return result;
+        }
+        // IFERROR may handle a deleted reference like other formula errors.
+        self.error = None;
         // Check if result is an error (starts with #) or infinity/NaN
         if result.starts_with("#") || result == "inf" || result == "-inf" || result == "nan" || result == "NaN" {
             // It's an error, return the value_if_error
@@ -1781,10 +1848,156 @@ mod tests {
     #[test]
     fn test_parse_cell_ref() {
         let sheet = Spreadsheet::new();
-        assert_eq!(sheet.parse_cell_ref("A1"), Some((0, 0)));
-        assert_eq!(sheet.parse_cell_ref("B2"), Some((1, 1)));
-        assert_eq!(sheet.parse_cell_ref("Z1"), Some((0, 25)));
-        assert_eq!(sheet.parse_cell_ref("a1"), Some((0, 0)));
+        let mut evaluator = FormulaEvaluator::new(&sheet);
+        assert_eq!(evaluator.parse_cell_ref("A1"), Some((0, 0)));
+        assert_eq!(evaluator.parse_cell_ref("B2"), Some((1, 1)));
+        assert_eq!(evaluator.parse_cell_ref("Z1"), Some((0, 25)));
+        assert_eq!(evaluator.parse_cell_ref("a1"), Some((0, 0)));
+        assert_eq!(evaluator.parse_cell_ref("$aa$5"), Some((4, 26)));
+        assert_eq!(evaluator.parse_cell_ref("A0"), None);
+        assert_eq!(evaluator.parse_cell_ref("1A"), None);
+        assert_eq!(evaluator.parse_cell_ref("AAAAAAAAAAAAAAAAAAAAAAAA1"), None);
+    }
+
+    #[test]
+    fn circular_reference_propagates_through_value_paths() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(1, 0, "5".into());
+        for formula in [
+            "=A1",
+            "=A1+1",
+            "=SUM(A1:A2)",
+            "=ABS(A1)",
+            "=ROUND(SUM(A1:A2),0)",
+            "=COUNTA(A1:A2)",
+            "=COUNTIF(A1,\"x\")",
+            "=CONCAT(A1,\" text\")",
+            "=IFERROR(A1,\"fallback\")",
+        ] {
+            sheet.set_cell(0, 0, formula.into());
+            assert_eq!(sheet.evaluate_cell(0, 0), "#CYCLE!", "{formula}");
+        }
+    }
+
+    #[test]
+    fn indirect_cycle_recovers_after_edit_and_if_keeps_unused_branch_lazy() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "=B1".into());
+        sheet.set_cell(0, 1, "=IF(1,SUM(A1:A1),5)".into());
+        sheet.set_cell(0, 2, "=SUM(B1,B1)".into());
+        sheet.set_cell(0, 3, "=IF(0,D1,7)".into());
+
+        for col in 0..3 {
+            assert_eq!(sheet.evaluate_cell(0, col), "#CYCLE!");
+        }
+        assert_eq!(sheet.evaluate_cell(0, 3), "7");
+
+        sheet.set_cell(0, 0, "2".into());
+        assert_eq!(sheet.evaluate_cell(0, 1), "2");
+        assert_eq!(sheet.evaluate_cell(0, 2), "4");
+    }
+
+    #[test]
+    fn reference_error_is_visible_after_coercion_and_aggregation() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "=#REF!".into());
+        sheet.set_cell(1, 0, "5".into());
+        sheet.set_cell(0, 1, "text".into());
+
+        for formula in [
+            "=A1",
+            "=B1+#REF!",
+            "=1+#REF!",
+            "=SUM(A1:A2)",
+            "=SUM(#REF!)",
+            "=COUNT(#REF!)",
+            "=COUNTA(A1:A2)",
+            "=ROUND(A1,0)",
+            "=ROUND(SUM(#REF!),0)",
+            "=COUNTIF(#REF!,\"x\")",
+            "=COUNTIF(A2,#REF!)",
+            "=SUMIF(A2,0,#REF!)",
+            "=VLOOKUP(5,#REF!,1)",
+        ] {
+            assert_eq!(sheet.evaluate_formula(formula, 5, 1), "#REF!", "{formula}");
+        }
+        assert_eq!(sheet.evaluate_formula("=IF(0,#REF!,7)", 5, 1), "7");
+        assert_eq!(sheet.evaluate_formula("=IFERROR(A1,7)", 5, 1), "7");
+        assert_eq!(
+            sheet.evaluate_formula("=CONCAT(\"#REF!\",\" literal\")", 5, 1),
+            "#REF! literal"
+        );
+        assert_eq!(sheet.evaluate_formula("=COUNTIF(A2:A2,A2)", 5, 1), "1");
+    }
+
+    #[test]
+    fn inserting_rows_rewrites_moved_formulas_and_expands_ranges() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(1, 0, "2".into());
+        sheet.set_cell(2, 0, "3".into());
+        sheet.set_cell(3, 0, "4".into());
+        sheet.set_cell(3, 1, "=SUM($A$2 : a4)".into());
+        sheet.set_cell(0, 2, "=A3".into());
+        sheet.selected_rows = Some((0, 1));
+        sheet.insert_rows_after_selected();
+
+        assert_eq!(sheet.get_cell(5, 1), "=SUM($A$2 : a6)");
+        assert_eq!(sheet.evaluate_cell(5, 1), "9");
+        assert_eq!(sheet.get_cell(0, 2), "=A5");
+        assert_eq!(sheet.evaluate_cell(0, 2), "3");
+    }
+
+    #[test]
+    fn deleting_rows_shrinks_ranges_and_marks_fully_removed_references() {
+        let mut sheet = Spreadsheet::new();
+        for row in 0..5 {
+            sheet.set_cell(row, 0, (row + 1).to_string());
+        }
+        sheet.set_cell(0, 1, "=SUM(A3:A1)".into());
+        sheet.set_cell(3, 1, "=SUM(A2:A5)".into());
+        sheet.set_cell(0, 2, "=A2+1".into());
+        sheet.set_cell(3, 2, "=SUM(A2:A3)".into());
+        sheet.selected_rows = Some((1, 2));
+        sheet.delete_selected_rows();
+
+        for (row, col, source, value) in [
+            (0, 1, "=SUM(A1:A1)", "1"),
+            (1, 1, "=SUM(A2:A3)", "9"),
+            (0, 2, "=#REF!+1", "#REF!"),
+            (1, 2, "=SUM(#REF!)", "#REF!"),
+        ] {
+            assert_eq!(sheet.get_cell(row, col), source);
+            assert_eq!(sheet.evaluate_cell(row, col), value);
+        }
+    }
+
+    #[test]
+    fn column_edits_shift_multi_letter_references_and_maintain_range_direction() {
+        let mut sheet = Spreadsheet::new();
+        sheet.num_cols = 30;
+        sheet.set_cell(0, 25, "3".into());
+        sheet.set_cell(0, 26, "7".into());
+        sheet.set_cell(0, 27, "=SUM($aa$1 : Z1)".into());
+        sheet.set_cell(0, 1, "=AA1".into());
+        sheet.set_cell(0, 2, "=Z1".into());
+        sheet.set_cell(0, 3, "=SHELL(echo AA1 Z1)".into());
+        sheet.selected_cols = Some((24, 25));
+        sheet.insert_columns_after_selected();
+
+        assert_eq!(sheet.get_cell(0, 29), "=SUM($ac$1 : Z1)");
+        assert_eq!(sheet.evaluate_cell(0, 29), "10");
+        assert_eq!(sheet.get_cell(0, 1), "=AC1");
+        assert_eq!(sheet.evaluate_cell(0, 1), "7");
+
+        sheet.selected_cols = Some((25, 26));
+        sheet.delete_selected_columns();
+        assert_eq!(sheet.get_cell(0, 27), "=SUM($aa$1 : Z1)");
+        assert_eq!(sheet.evaluate_cell(0, 27), "7");
+        assert_eq!(sheet.get_cell(0, 1), "=AA1");
+        assert_eq!(sheet.evaluate_cell(0, 1), "7");
+        assert_eq!(sheet.get_cell(0, 2), "=#REF!");
+        assert_eq!(sheet.evaluate_cell(0, 2), "#REF!");
+        assert_eq!(sheet.get_cell(0, 3), "=SHELL(echo AA1 Z1)");
     }
 
     #[test]
@@ -1825,7 +2038,7 @@ mod tests {
 
     #[test]
     fn test_arithmetic() {
-        let mut sheet = Spreadsheet::new();
+        let sheet = Spreadsheet::new();
         assert_eq!(sheet.evaluate_formula("=1+2", 0, 0), "3");
         assert_eq!(sheet.evaluate_formula("=10-3", 0, 0), "7");
         assert_eq!(sheet.evaluate_formula("=4*5", 0, 0), "20");
@@ -2070,7 +2283,7 @@ mod tests {
 
     #[test]
     fn test_evaluate_round() {
-        let mut sheet = Spreadsheet::new();
+        let sheet = Spreadsheet::new();
         assert_eq!(sheet.evaluate_formula("=ROUND(3.14159,2)", 0, 0), "3.14");
         assert_eq!(sheet.evaluate_formula("=ROUND(3.14159,0)", 0, 0), "3");
         assert_eq!(sheet.evaluate_formula("=ROUND(3.5,0)", 0, 0), "4");

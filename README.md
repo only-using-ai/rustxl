@@ -173,6 +173,8 @@ cat data.txt | xl
 
 Start any cell with `=` to enter a formula. Formulas are case-insensitive.
 
+Inserting or deleting rows or columns updates references in surviving formulas. Ranges expand around insertions inside them and shrink when part of a range is deleted. A deleted reference shows `#REF!` if its cell or entire range is gone. Circular references show `#CYCLE!`.
+
 #### Supported Functions
 
 **Math & Statistics:**
