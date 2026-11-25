@@ -282,9 +282,6 @@ fn handle_open_mode(spreadsheet: &mut Spreadsheet, code: KeyCode) -> bool {
                 let filename = spreadsheet.open_filename.clone();
                 if let Err(e) = spreadsheet.load_from_file(&filename) {
                     spreadsheet.open_message = Some(format!("Error: {}", e));
-                } else {
-                    spreadsheet.open_message = Some(format!("Loaded {}", filename));
-                    spreadsheet.exit_open_mode();
                 }
             }
         }
@@ -860,6 +857,23 @@ mod tests {
 
         handle_ready_mode(&mut sheet, KeyCode::Right, KeyModifiers::empty());
         assert_eq!(sheet.cursor_col, 1);
+    }
+
+    #[test]
+    fn failed_open_keeps_dialog_ready_to_retry() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "keep this".into());
+        sheet.enter_open_mode();
+        sheet.open_filename = "Cargo.toml".into();
+
+        handle_open_mode(&mut sheet, KeyCode::Enter);
+
+        assert!(sheet.open_mode);
+        assert_eq!(sheet.open_filename, "Cargo.toml");
+        assert!(
+            sheet.open_message.as_deref().unwrap().contains("Unsupported file format")
+        );
+        assert_eq!(sheet.get_cell(0, 0), "keep this");
     }
 
     #[test]

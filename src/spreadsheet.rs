@@ -1147,48 +1147,50 @@ impl Spreadsheet {
             .unwrap_or("")
             .to_lowercase();
 
+        let mut loaded = Self::new();
         match extension.as_str() {
-            "csv" => self.load_csv(filepath),
-            "tsv" => self.load_tsv(filepath),
-            "xlsx" | "xls" => self.load_excel(filepath),
-            _ => Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("Unsupported file format: {}", extension),
-            )),
+            "csv" => loaded.load_delimited(std::fs::File::open(path)?, b',')?,
+            "tsv" => loaded.load_delimited(std::fs::File::open(path)?, b'\t')?,
+            "xlsx" | "xls" => loaded.load_excel(filepath)?,
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Unsupported file format: {}", extension),
+                ));
+            }
         }
+        self.replace_document(loaded);
+        Ok(())
     }
 
-    fn load_csv(&mut self, filepath: &str) -> std::io::Result<()> {
-        self.load_delimited(filepath, b',')
+    fn replace_document(&mut self, mut loaded: Self) {
+        let (max_row, max_col) = loaded.get_data_bounds();
+        loaded.num_rows = (max_row + 1).max(DEFAULT_ROWS);
+        loaded.num_cols = (max_col + 1).max(DEFAULT_COLS);
+
+        loaded.dark_mode = self.dark_mode;
+        loaded.hide_update_prompt = self.hide_update_prompt;
+        loaded.update_available = self.update_available.take();
+        loaded.update_prompt_shown = self.update_prompt_shown;
+        loaded.update_in_progress = self.update_in_progress;
+        loaded.update_message = self.update_message.take();
+        *self = loaded;
     }
 
-    fn load_tsv(&mut self, filepath: &str) -> std::io::Result<()> {
-        self.load_delimited(filepath, b'\t')
-    }
-
-    fn load_delimited(&mut self, filepath: &str, delimiter: u8) -> std::io::Result<()> {
+    fn load_delimited(&mut self, source: impl std::io::Read, delimiter: u8) -> std::io::Result<()> {
         let mut reader = csv::ReaderBuilder::new()
             .delimiter(delimiter)
             .has_headers(false)
-            .from_path(filepath)?;
+            .from_reader(source);
 
-        self.cells.clear();
-        let mut row_idx = 0;
-
-        for result in reader.records() {
+        for (row_idx, result) in reader.records().enumerate() {
             let record = result?;
             for (col_idx, field) in record.iter().enumerate() {
                 if !field.is_empty() {
                     self.set_cell(row_idx, col_idx, field.to_string());
                 }
             }
-            row_idx += 1;
         }
-
-        // Update dimensions based on loaded data
-        let (max_row, max_col) = self.get_data_bounds();
-        self.num_rows = (max_row + 1).max(DEFAULT_ROWS);
-        self.num_cols = (max_col + 1).max(DEFAULT_COLS);
 
         Ok(())
     }
@@ -1215,8 +1217,6 @@ impl Spreadsheet {
         let range = workbook
             .worksheet_range(&sheet_names[0])
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-
-        self.cells.clear();
 
         for (row_idx, row) in range.rows().enumerate() {
             for (col_idx, cell) in row.iter().enumerate() {
@@ -1247,11 +1247,6 @@ impl Spreadsheet {
                 }
             }
         }
-
-        // Update dimensions based on loaded data
-        let (max_row, max_col) = self.get_data_bounds();
-        self.num_rows = (max_row + 1).max(DEFAULT_ROWS);
-        self.num_cols = (max_col + 1).max(DEFAULT_COLS);
 
         Ok(())
     }
