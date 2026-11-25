@@ -1255,6 +1255,9 @@ impl Spreadsheet {
         let range = workbook
             .worksheet_range(&sheet_names[0])
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        let Some((start_row, start_col)) = range.start() else {
+            return Ok(());
+        };
 
         for (row_idx, row) in range.rows().enumerate() {
             for (col_idx, cell) in row.iter().enumerate() {
@@ -1281,7 +1284,11 @@ impl Spreadsheet {
                 };
 
                 if !value.is_empty() {
-                    self.set_cell(row_idx, col_idx, value);
+                    self.set_cell(
+                        start_row as usize + row_idx,
+                        start_col as usize + col_idx,
+                        value,
+                    );
                 }
             }
         }
@@ -1688,5 +1695,49 @@ drwxr-xr-x  3 user group  96 Jan 23 14:20 .git
             .unwrap();
         assert_eq!(sheet.get_cell(0, 0), "first,last");
         assert_eq!(sheet.get_cell(0, 1), "extra");
+    }
+
+    #[test]
+    fn excel_open_keeps_lone_value_at_c5() {
+        let mut sheet = Spreadsheet::new();
+        sheet
+            .load_from_file(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/only-c5.xlsx"
+            ))
+            .unwrap();
+
+        assert_eq!(sheet.get_cell(4, 2), "42");
+        assert_eq!(sheet.get_cell(0, 0), "");
+        assert_eq!(sheet.cells.len(), 1);
+    }
+
+    #[test]
+    fn excel_open_expands_grid_for_offset_value() {
+        let mut sheet = Spreadsheet::new();
+        sheet
+            .load_from_file(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/only-ab105.xlsx"
+            ))
+            .unwrap();
+
+        assert_eq!(sheet.get_cell(104, 27), "7");
+        assert_eq!((sheet.num_rows, sheet.num_cols), (105, 28));
+    }
+
+    #[test]
+    fn excel_open_replaces_current_sheet_with_empty_worksheet() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "before Open".into());
+        sheet
+            .load_from_file(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/empty-sheet.xlsx"
+            ))
+            .unwrap();
+
+        assert!(sheet.cells.is_empty());
+        assert_eq!((sheet.num_rows, sheet.num_cols), (DEFAULT_ROWS, DEFAULT_COLS));
     }
 }
