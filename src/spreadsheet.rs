@@ -3,6 +3,9 @@ use std::io::{self, Read};
 
 use ratatui::layout::Rect;
 
+use crate::clipboard::{
+    ClipboardBackend, ClipboardRead, ClipboardText, Generation, Publication, export_token,
+};
 use crate::constants::{DEFAULT_COLS, DEFAULT_ROWS};
 use crate::formula_ref::{self, Axis, Edit};
 use crate::shell::ShellPrompt;
@@ -17,6 +20,7 @@ pub struct ClipboardData {
     height: usize,
     width: usize,
     action: ClipboardAction,
+    export: ClipboardExport,
 }
 
 #[derive(PartialEq)]
@@ -24,6 +28,52 @@ enum ClipboardAction {
     Copy,
     Cut,
     StaleCut,
+}
+
+enum ClipboardExport {
+    Local,
+    Failed,
+    Published {
+        token: String,
+        generation: Option<Generation>,
+    },
+}
+
+impl ClipboardData {
+    fn plain_text(&self) -> String {
+        let mut text = String::new();
+        let mut cells = self.cells.iter().peekable();
+        for row in 0..self.height {
+            if row > 0 {
+                text.push('\n');
+            }
+            for col in 0..self.width {
+                if col > 0 {
+                    text.push('\t');
+                }
+                if let Some((_, value, _)) = cells.next_if(|cell| cell.0 == (row, col)) {
+                    text.push_str(value);
+                }
+            }
+        }
+        text
+    }
+
+    fn matches_export(&self, entry: &ClipboardText, observed: Option<Generation>) -> bool {
+        match &self.export {
+            ClipboardExport::Published { token, generation } => {
+                (generation.is_none() || observed.is_none() || *generation == observed)
+                    && entry.token.as_ref() == Some(token)
+                    && self.plain_text() == entry.text
+            }
+            _ => false,
+        }
+    }
+
+    fn owns_publication(&self, observed: Option<Generation>) -> bool {
+        matches!(self.export, ClipboardExport::Published { generation: Some(generation), .. }
+            if Some(generation) == observed)
+    }
 }
 
 pub struct Spreadsheet {
@@ -286,34 +336,23 @@ impl Spreadsheet {
     }
 
     /// Copy the current selection (or single cell) to clipboard
-    pub fn copy_selection(&mut self) {
-        self.copy_or_cut_selection(false);
+    pub fn copy_selection(&mut self, clipboard: &mut impl ClipboardBackend) {
+        self.copy_or_cut_selection(false, clipboard);
     }
 
     /// Cut the current selection (or single cell) - copies and marks for deletion on paste
-    pub fn cut_selection(&mut self) {
-        self.copy_or_cut_selection(true);
+    pub fn cut_selection(&mut self, clipboard: &mut impl ClipboardBackend) {
+        self.copy_or_cut_selection(true, clipboard);
     }
 
-    fn copy_or_cut_selection(&mut self, is_cut: bool) {
-        let snapshot = self.capture_clipboard(is_cut);
-        let (start_row, start_col) = snapshot.origin;
-        let mut text = String::new();
-        for row in 0..snapshot.height {
-            if row > 0 {
-                text.push('\n');
-            }
-            for col in 0..snapshot.width {
-                if col > 0 {
-                    text.push('\t');
-                }
-                text.push_str(self.get_cell(start_row + row, start_col + col));
-            }
-        }
-
-        if let Ok(mut clipboard) = arboard::Clipboard::new() {
-            let _ = clipboard.set_text(text);
-        }
+    fn copy_or_cut_selection(&mut self, is_cut: bool, clipboard: &mut impl ClipboardBackend) {
+        let mut snapshot = self.capture_clipboard(is_cut);
+        let token = export_token();
+        snapshot.export = match clipboard.publish(&snapshot.plain_text(), &token) {
+            Publication::Offline => ClipboardExport::Local,
+            Publication::Failed => ClipboardExport::Failed,
+            Publication::Published(generation) => ClipboardExport::Published { token, generation },
+        };
         self.clipboard_data = Some(snapshot);
     }
 
@@ -339,6 +378,7 @@ impl Spreadsheet {
             origin,
             height,
             width,
+            export: ClipboardExport::Local,
             action: if is_cut {
                 ClipboardAction::Cut
             } else {
@@ -372,20 +412,44 @@ impl Spreadsheet {
     }
 
     /// Paste from clipboard at current cursor position
-    pub fn paste(&mut self) {
+    pub fn paste(&mut self, clipboard: &mut impl ClipboardBackend) {
         self.clipboard_message = None;
-        // First, try to use internal clipboard data if available
-        if let Some(clipboard_data) = self.clipboard_data.take() {
-            self.paste_internal(clipboard_data);
-            return;
-        }
-
-        // Fall back to system clipboard
-        if let Ok(mut clipboard) = arboard::Clipboard::new() {
-            if let Ok(text) = clipboard.get_text() {
-                self.paste_text(&text);
+        let snapshot = self.clipboard_data.take();
+        let entry = clipboard.read_stable();
+        match entry {
+            ClipboardRead::Text(entry, generation) => {
+                if let Some(snapshot) =
+                    snapshot.filter(|data| data.matches_export(&entry, generation))
+                {
+                    let can_move = snapshot.owns_publication(generation);
+                    self.paste_snapshot(snapshot, can_move);
+                } else {
+                    self.paste_text(&entry.text);
+                }
+            }
+            ClipboardRead::NoText => {}
+            ClipboardRead::Changed => {
+                self.clipboard_data = snapshot.map(|mut snapshot| {
+                    snapshot.action = ClipboardAction::Copy;
+                    snapshot
+                });
+                self.clipboard_message = Some("  Clipboard changed. Paste again.");
+            }
+            ClipboardRead::Offline | ClipboardRead::Unavailable => {
+                if let Some(snapshot) = snapshot {
+                    let can_move = matches!(entry, ClipboardRead::Offline)
+                        && matches!(snapshot.export, ClipboardExport::Local);
+                    self.paste_snapshot(snapshot, can_move);
+                }
             }
         }
+    }
+
+    fn paste_snapshot(&mut self, mut snapshot: ClipboardData, can_move: bool) {
+        if snapshot.action == ClipboardAction::Cut && !can_move {
+            snapshot.action = ClipboardAction::StaleCut;
+        }
+        self.paste_internal(snapshot);
     }
 
     fn paste_internal(&mut self, mut snapshot: ClipboardData) {
@@ -1390,6 +1454,7 @@ impl Default for Spreadsheet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clipboard::OfflineClipboard;
 
     #[test]
     fn test_col_name() {
@@ -1452,7 +1517,7 @@ mod tests {
         sheet.clipboard_data = Some(sheet.capture_clipboard(true));
         sheet.set_cell(0, 1, "edited".into());
 
-        sheet.paste();
+        sheet.paste(&mut OfflineClipboard);
 
         assert_eq!(sheet.get_cell(0, 0), "first");
         assert_eq!(sheet.get_cell(0, 1), "edited");
@@ -1460,7 +1525,7 @@ mod tests {
         assert!(sheet.clipboard_message.is_some());
 
         sheet.cursor_col = 3;
-        sheet.paste();
+        sheet.paste(&mut OfflineClipboard);
         assert_eq!(sheet.get_cell(0, 1), "edited");
         assert_eq!(sheet.get_cell(0, 3), "first");
         assert_eq!(sheet.get_cell(0, 4), "second");
@@ -1477,7 +1542,7 @@ mod tests {
         sheet.set_cell(0, 1, "new".into());
         sheet.cursor_col = 2;
 
-        sheet.paste();
+        sheet.paste(&mut OfflineClipboard);
 
         assert_eq!(sheet.get_cell(0, 0), "first");
         assert_eq!(sheet.get_cell(0, 1), "new");
@@ -1493,7 +1558,7 @@ mod tests {
         sheet.set_cell_bold(0, 0, true);
         sheet.cursor_col = 1;
 
-        sheet.paste();
+        sheet.paste(&mut OfflineClipboard);
 
         assert_eq!(sheet.get_cell(0, 0), "same value");
         assert!(sheet.get_cell_style(0, 0).bold);
@@ -1512,7 +1577,7 @@ mod tests {
         sheet.selected_rows = Some((0, 0));
         sheet.delete_selected_rows();
         sheet.cursor_col = 1;
-        sheet.paste();
+        sheet.paste(&mut OfflineClipboard);
 
         assert_eq!(sheet.get_cell(0, 0), "same value");
         assert_eq!(sheet.get_cell(1, 0), "same value");
@@ -1531,7 +1596,7 @@ mod tests {
         sheet.selected_cols = Some((0, 0));
         sheet.insert_columns_after_selected();
         sheet.cursor_col = 4;
-        sheet.paste();
+        sheet.paste(&mut OfflineClipboard);
 
         assert_eq!(sheet.get_cell(0, 2), "same value");
         assert_eq!(sheet.get_cell(0, 3), "same value");
@@ -1549,7 +1614,7 @@ mod tests {
         sheet.cursor_col = 1;
         sheet.clipboard_data = Some(sheet.capture_clipboard(true));
 
-        sheet.paste();
+        sheet.paste(&mut OfflineClipboard);
 
         assert_eq!(sheet.get_cell(0, 0), "");
         assert!(!sheet.get_cell_style(0, 0).bold);
@@ -1578,7 +1643,7 @@ mod tests {
         }
         sheet.cursor_row = 3;
         sheet.cursor_col = 4;
-        sheet.paste();
+        sheet.paste(&mut OfflineClipboard);
 
         assert_eq!(sheet.get_cell(3, 4), "copied");
         assert_eq!(sheet.get_cell(3, 5), "");
@@ -1593,7 +1658,7 @@ mod tests {
 
         sheet.cursor_row = DEFAULT_ROWS - 1;
         sheet.cursor_col = DEFAULT_COLS - 1;
-        sheet.paste();
+        sheet.paste(&mut OfflineClipboard);
         assert_eq!(sheet.get_cell(DEFAULT_ROWS - 1, DEFAULT_COLS - 1), "copied");
         assert_eq!(sheet.num_rows, DEFAULT_ROWS + 1);
         assert_eq!(sheet.num_cols, DEFAULT_COLS + 2);

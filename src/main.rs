@@ -1,3 +1,4 @@
+mod clipboard;
 mod constants;
 mod formula;
 mod formula_ref;

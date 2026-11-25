@@ -5,6 +5,7 @@ use std::time::Duration;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{backend::CrosstermBackend, Terminal};
 
+use crate::clipboard::{ClipboardBackend, SystemClipboard};
 use crate::constants::COLOR_PALETTE;
 use crate::settings;
 use crate::shell;
@@ -18,6 +19,7 @@ pub fn run_app(
     mut spreadsheet: Spreadsheet,
     update_rx: Receiver<UpdateMessage>,
 ) -> io::Result<()> {
+    let mut clipboard = SystemClipboard::default();
 
     loop {
         // Check for update messages (non-blocking)
@@ -87,9 +89,19 @@ pub fn run_app(
                     } else if spreadsheet.row_column_select_mode != RowColumnSelectMode::None {
                         handle_row_column_select_mode(&mut spreadsheet, key.code, key.modifiers);
                     } else if spreadsheet.find_mode {
-                        handle_find_mode(&mut spreadsheet, key.code, key.modifiers);
+                        handle_find_mode(
+                            &mut spreadsheet,
+                            key.code,
+                            key.modifiers,
+                            &mut clipboard,
+                        );
                     } else {
-                        if handle_ready_mode(&mut spreadsheet, key.code, key.modifiers) {
+                        if handle_ready_mode(
+                            &mut spreadsheet,
+                            key.code,
+                            key.modifiers,
+                            &mut clipboard,
+                        ) {
                             return Ok(());
                         }
                     }
@@ -542,29 +554,39 @@ fn handle_visual_data_type(spreadsheet: &mut Spreadsheet, code: KeyCode) {
     }
 }
 
+fn handle_clipboard_shortcut(
+    spreadsheet: &mut Spreadsheet,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    clipboard: &mut impl ClipboardBackend,
+) -> bool {
+    if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER) {
+        return false;
+    }
+    match code {
+        KeyCode::Char('c') => spreadsheet.copy_selection(clipboard),
+        KeyCode::Char('x') => spreadsheet.cut_selection(clipboard),
+        KeyCode::Char('v') => spreadsheet.paste(clipboard),
+        _ => return false,
+    }
+    true
+}
+
 fn handle_ready_mode(
     spreadsheet: &mut Spreadsheet,
     code: KeyCode,
     modifiers: KeyModifiers,
+    clipboard: &mut impl ClipboardBackend,
 ) -> bool {
+    if handle_clipboard_shortcut(spreadsheet, code, modifiers, clipboard) {
+        return false;
+    }
     let shift = modifiers.contains(KeyModifiers::SHIFT);
     let ctrl_or_cmd = modifiers.contains(KeyModifiers::CONTROL) || modifiers.contains(KeyModifiers::SUPER);
     let cmd = modifiers.contains(KeyModifiers::SUPER);
     let alt = modifiers.contains(KeyModifiers::ALT);
     
     match code {
-        // Copy (Ctrl+C / Cmd+C)
-        KeyCode::Char('c') if ctrl_or_cmd => {
-            spreadsheet.copy_selection();
-        }
-        // Cut (Ctrl+X / Cmd+X)
-        KeyCode::Char('x') if ctrl_or_cmd => {
-            spreadsheet.cut_selection();
-        }
-        // Paste (Ctrl+V / Cmd+V)
-        KeyCode::Char('v') if ctrl_or_cmd => {
-            spreadsheet.paste();
-        }
         // Cmd+Arrow or Alt+Arrow: Jump to last data column/row
         // On macOS, Cmd+Arrow might be intercepted by the system, so Alt+Arrow is more reliable
         KeyCode::Right if cmd || alt => {
@@ -786,22 +808,16 @@ fn handle_row_column_select_mode(
     }
 }
 
-fn handle_find_mode(spreadsheet: &mut Spreadsheet, code: KeyCode, modifiers: KeyModifiers) {
-    let ctrl_or_cmd = modifiers.contains(KeyModifiers::CONTROL) || modifiers.contains(KeyModifiers::SUPER);
-    
+fn handle_find_mode(
+    spreadsheet: &mut Spreadsheet,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    clipboard: &mut impl ClipboardBackend,
+) {
+    if handle_clipboard_shortcut(spreadsheet, code, modifiers, clipboard) {
+        return;
+    }
     match code {
-        // Copy (Ctrl+C / Cmd+C)
-        KeyCode::Char('c') if ctrl_or_cmd => {
-            spreadsheet.copy_selection();
-        }
-        // Cut (Ctrl+X / Cmd+X)
-        KeyCode::Char('x') if ctrl_or_cmd => {
-            spreadsheet.cut_selection();
-        }
-        // Paste (Ctrl+V / Cmd+V)
-        KeyCode::Char('v') if ctrl_or_cmd => {
-            spreadsheet.paste();
-        }
         KeyCode::Char(c) => {
             spreadsheet.find_query.push(c);
             spreadsheet.update_find_matches();
@@ -873,6 +889,7 @@ fn handle_shell_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clipboard::OfflineClipboard;
     use crate::shell::ShellStep;
     use ratatui::backend::TestBackend;
 
@@ -912,7 +929,12 @@ mod tests {
         sheet.set_cell(0, 0, "edited".into());
         sheet.cursor_col = 1;
 
-        handle_ready_mode(&mut sheet, KeyCode::Char('v'), KeyModifiers::CONTROL);
+        handle_ready_mode(
+            &mut sheet,
+            KeyCode::Char('v'),
+            KeyModifiers::CONTROL,
+            &mut OfflineClipboard,
+        );
 
         let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
         assert!(
@@ -1113,18 +1135,38 @@ mod tests {
     #[test]
     fn test_ready_mode_quit() {
         let mut sheet = Spreadsheet::new();
-        assert!(handle_ready_mode(&mut sheet, KeyCode::Char('q'), KeyModifiers::empty()));
-        assert!(handle_ready_mode(&mut sheet, KeyCode::Char('Q'), KeyModifiers::empty()));
+        assert!(handle_ready_mode(
+            &mut sheet,
+            KeyCode::Char('q'),
+            KeyModifiers::empty(),
+            &mut OfflineClipboard,
+        ));
+        assert!(handle_ready_mode(
+            &mut sheet,
+            KeyCode::Char('Q'),
+            KeyModifiers::empty(),
+            &mut OfflineClipboard,
+        ));
     }
 
     #[test]
     fn test_ready_mode_movement() {
         let mut sheet = Spreadsheet::new();
 
-        handle_ready_mode(&mut sheet, KeyCode::Down, KeyModifiers::empty());
+        handle_ready_mode(
+            &mut sheet,
+            KeyCode::Down,
+            KeyModifiers::empty(),
+            &mut OfflineClipboard,
+        );
         assert_eq!(sheet.cursor_row, 1);
 
-        handle_ready_mode(&mut sheet, KeyCode::Right, KeyModifiers::empty());
+        handle_ready_mode(
+            &mut sheet,
+            KeyCode::Right,
+            KeyModifiers::empty(),
+            &mut OfflineClipboard,
+        );
         assert_eq!(sheet.cursor_col, 1);
     }
 
