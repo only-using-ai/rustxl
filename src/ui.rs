@@ -69,7 +69,8 @@ fn format_cell_by_type(value: &str, data_type: DataType) -> String {
 pub fn render(f: &mut Frame, spreadsheet: &mut Spreadsheet) {
     let area = f.area();
 
-    if spreadsheet.shell_prompt.is_some() {
+    if let Some(prompt) = &mut spreadsheet.shell_prompt {
+        prompt.can_confirm = false;
         render_shell_prompt(f, spreadsheet, area);
         return;
     }
@@ -166,7 +167,7 @@ fn render_shell_prompt(f: &mut Frame, spreadsheet: &mut Spreadsheet, area: Rect)
                 Cow::Owned(format!(
                     "Destination range {range}\nCells to write {writes}\nOccupied cells to overwrite {occupied}"
                 )),
-                "a Apply   ↑/↓ Scroll   Esc Cancel",
+                "a Apply   Esc Cancel",
             )
         }
         ShellStep::Message(message) => (
@@ -175,19 +176,27 @@ fn render_shell_prompt(f: &mut Frame, spreadsheet: &mut Spreadsheet, area: Rect)
             "↑/↓ Scroll   Esc Close",
         ),
     };
+    let title_width = Span::raw(title.as_str()).width();
     let block = Block::default().borders(Borders::ALL).title(title);
     let inner = block.inner(area);
-    f.render_widget(block, area);
-    if inner.width == 0 || inner.height < 2 {
+    let footer = shell_preview_lines(controls, inner.width.into());
+    let height = usize::from(inner.height).saturating_sub(footer.len());
+    let lines = if height > 0 && usize::from(inner.width) >= title_width {
+        shell_preview_lines(&text, inner.width.into())
+    } else {
+        Vec::new()
+    };
+    if lines.is_empty() || (matches!(prompt.step, ShellStep::Apply(_)) && lines.len() > height) {
+        f.render_widget(
+            Paragraph::new("Resize to review SHELL. Esc closes.").wrap(Wrap { trim: false }),
+            area,
+        );
         return;
     }
 
-    let footer = shell_preview_lines(controls, inner.width.into());
-    let footer_height = footer.len().min(usize::from(inner.height - 1)) as u16;
+    f.render_widget(block, area);
     let [body_area, footer_area] =
-        Layout::vertical([Constraint::Min(1), Constraint::Length(footer_height)]).areas(inner);
-    let lines = shell_preview_lines(&text, body_area.width.into());
-    let height = usize::from(body_area.height);
+        Layout::vertical([Constraint::Min(1), Constraint::Length(footer.len() as u16)]).areas(inner);
     let scroll = prompt.scroll.min(lines.len().saturating_sub(height));
     let visible = lines
         .into_iter()
@@ -203,6 +212,7 @@ fn render_shell_prompt(f: &mut Frame, spreadsheet: &mut Spreadsheet, area: Rect)
     );
     if let Some(prompt) = &mut spreadsheet.shell_prompt {
         prompt.scroll = scroll;
+        prompt.can_confirm = !matches!(prompt.step, ShellStep::Message(_));
     }
 }
 

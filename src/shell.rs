@@ -5,6 +5,7 @@ use crate::spreadsheet::Spreadsheet;
 pub struct ShellPrompt {
     pub step: ShellStep,
     pub scroll: usize,
+    pub can_confirm: bool,
 }
 
 pub enum ShellStep {
@@ -145,6 +146,7 @@ impl Spreadsheet {
         self.shell_prompt = Some(ShellPrompt {
             step: ShellStep::Run { row, col, command },
             scroll: 0,
+            can_confirm: false,
         });
         Ok(())
     }
@@ -153,6 +155,9 @@ impl Spreadsheet {
         let Some(prompt) = &mut self.shell_prompt else {
             return;
         };
+        if !prompt.can_confirm {
+            return;
+        }
         let ShellStep::Run { row, col, command } = &prompt.step else {
             return;
         };
@@ -164,12 +169,14 @@ impl Spreadsheet {
             Err(message) => ShellStep::Message(message),
         };
         prompt.scroll = 0;
+        prompt.can_confirm = false;
     }
 
     pub fn apply_shell_output(&mut self) {
         match self.shell_prompt.take() {
             Some(ShellPrompt {
                 step: ShellStep::Apply(output),
+                can_confirm: true,
                 ..
             }) => output.apply(self),
             other => self.shell_prompt = other,

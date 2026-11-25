@@ -37,7 +37,10 @@ pub fn run_app(
             }
         }
 
-        terminal.draw(|f| ui::render(f, &mut spreadsheet))?;
+        let drawn_size = terminal
+            .draw(|f| ui::render(f, &mut spreadsheet))?
+            .area
+            .as_size();
 
         // Use poll with timeout to allow checking update messages periodically
         if event::poll(Duration::from_millis(100))? {
@@ -48,7 +51,10 @@ pub fn run_app(
                     }
 
                     if spreadsheet.shell_prompt.is_some() {
-                        if key.modifiers.is_empty() {
+                        let confirming = matches!(key.code, KeyCode::Char('r' | 'a'));
+                        if key.modifiers.is_empty()
+                            && (!confirming || terminal.size()? == drawn_size)
+                        {
                             handle_shell_prompt(&mut spreadsheet, key.code, shell::run_command);
                         }
                         continue;
@@ -961,6 +967,8 @@ mod tests {
         open_shell_preview(&mut sheet);
         press_shell_key(&mut sheet, KeyCode::Char('a'));
         press_shell_key(&mut sheet, KeyCode::Enter);
+        let mut terminal = Terminal::new(TestBackend::new(45, 8)).unwrap();
+        render_sheet(&mut terminal, &mut sheet);
 
         let mut calls = 0;
         let runner = |command: &str| {
@@ -974,7 +982,6 @@ mod tests {
         assert_eq!(sheet.cells, cells);
         assert_eq!((sheet.num_rows, sheet.num_cols), (2, 3));
 
-        let mut terminal = Terminal::new(TestBackend::new(45, 8)).unwrap();
         let preview = render_sheet(&mut terminal, &mut sheet);
         assert!(preview.contains("Destination range B1:D3"));
         assert!(preview.contains("Cells to write 6"));
@@ -998,8 +1005,10 @@ mod tests {
         sheet.set_cell(0, 0, "=SHELL(echo example)".to_string());
         let cells = sheet.cells.clone();
         let dimensions = (sheet.num_rows, sheet.num_cols);
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
 
         open_shell_preview(&mut sheet);
+        render_sheet(&mut terminal, &mut sheet);
         handle_shell_prompt(&mut sheet, KeyCode::Char('r'), |_| Ok("one\ntwo".into()));
         let ShellStep::Apply(output) = &sheet.shell_prompt.as_ref().unwrap().step else {
             panic!("expected an output preview");
@@ -1013,6 +1022,7 @@ mod tests {
             (Err("could not run".into()), "could not run"),
         ] {
             open_shell_preview(&mut sheet);
+            render_sheet(&mut terminal, &mut sheet);
             handle_shell_prompt(&mut sheet, KeyCode::Char('r'), |_| result);
             assert!(matches!(
                 &sheet.shell_prompt.as_ref().unwrap().step,
@@ -1026,10 +1036,62 @@ mod tests {
         }
 
         open_shell_preview(&mut sheet);
+        render_sheet(&mut terminal, &mut sheet);
         handle_shell_prompt(&mut sheet, KeyCode::Char('r'), |_| Ok("one\ntwo".into()));
+        render_sheet(&mut terminal, &mut sheet);
         press_shell_key(&mut sheet, KeyCode::Char('a'));
         assert_eq!(sheet.get_cell(0, 0), "one\ntwo");
         assert_eq!((sheet.num_rows, sheet.num_cols), dimensions);
+    }
+
+    #[test]
+    fn shell_confirmation_requires_a_visible_preview_after_resize() {
+        let mut sheet = Spreadsheet::new();
+        let formula = "=SHELL(echo example)";
+        sheet.set_cell(0, 0, formula.to_string());
+        let mut terminal = Terminal::new(TestBackend::new(80, 3)).unwrap();
+
+        open_shell_preview(&mut sheet);
+        press_shell_key(&mut sheet, KeyCode::Char('r'));
+        let small = render_sheet(&mut terminal, &mut sheet);
+        assert!(small.contains("Resize to review SHELL"));
+        assert!(!small.contains("echo example"));
+        press_shell_key(&mut sheet, KeyCode::Char('r'));
+        press_shell_key(&mut sheet, KeyCode::Esc);
+        assert!(sheet.shell_prompt.is_none());
+
+        open_shell_preview(&mut sheet);
+        terminal.backend_mut().resize(80, 8);
+        assert!(render_sheet(&mut terminal, &mut sheet).contains("echo example"));
+        terminal.backend_mut().resize(2, 8);
+        render_sheet(&mut terminal, &mut sheet);
+        press_shell_key(&mut sheet, KeyCode::Char('r'));
+        terminal.backend_mut().resize(80, 8);
+        assert!(render_sheet(&mut terminal, &mut sheet).contains("echo example"));
+        let mut calls = 0;
+        handle_shell_prompt(&mut sheet, KeyCode::Char('r'), |command| {
+            calls += 1;
+            assert_eq!(command, "echo example");
+            Ok("result".into())
+        });
+        assert_eq!(calls, 1);
+
+        press_shell_key(&mut sheet, KeyCode::Char('a'));
+        assert_eq!(sheet.get_cell(0, 0), formula);
+        assert!(render_sheet(&mut terminal, &mut sheet).contains("Destination range A1"));
+        for height in [3, 4] {
+            terminal.backend_mut().resize(80, height);
+            assert!(render_sheet(&mut terminal, &mut sheet).contains("Resize to review SHELL"));
+            press_shell_key(&mut sheet, KeyCode::Char('a'));
+            assert_eq!(sheet.get_cell(0, 0), formula);
+        }
+        terminal.backend_mut().resize(80, 8);
+        let apply = render_sheet(&mut terminal, &mut sheet);
+        assert!(apply.contains("Destination range A1"));
+        assert!(apply.contains("Occupied cells to overwrite 1"));
+        press_shell_key(&mut sheet, KeyCode::Char('a'));
+        assert_eq!(sheet.get_cell(0, 0), "result");
+        assert!(sheet.shell_prompt.is_none());
     }
 
     #[test]
