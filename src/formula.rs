@@ -1,4 +1,4 @@
-use crate::spreadsheet::Spreadsheet;
+use crate::{shell, spreadsheet::Spreadsheet};
 
 impl Spreadsheet {
     pub fn evaluate_cell(&mut self, row: usize, col: usize) -> String {
@@ -14,10 +14,12 @@ impl Spreadsheet {
         let expr = formula.strip_prefix('=').unwrap_or(formula).trim();
         let expr_upper = expr.to_uppercase();
 
-        // Handle SHELL function (case-insensitive)
-        if expr_upper.starts_with("SHELL(") && expr_upper.ends_with(')') {
-            let inner = &expr[6..expr.len() - 1];
-            return self.evaluate_shell(inner, row, col);
+        if let Some(args) = shell::shell_args(expr) {
+            return if shell::shell_command(args).is_some() {
+                "[SHELL]".to_string()
+            } else {
+                "#ERROR".to_string()
+            };
         }
 
         // Handle SUM function (case-insensitive)
@@ -663,19 +665,7 @@ impl Spreadsheet {
     }
 
     pub fn get_cell_value_at(&mut self, row: usize, col: usize) -> Option<f64> {
-        let content = self.get_cell(row, col).to_string();
-        if content.starts_with('=') {
-            // SHELL formulas don't return numeric values, so skip them
-            let expr = content.strip_prefix('=').unwrap_or(&content).trim();
-            let expr_upper = expr.to_uppercase();
-            if expr_upper.starts_with("SHELL(") {
-                return None;
-            }
-            // For other formulas, evaluate and try to parse as number
-            self.evaluate_formula(&content, row, col).parse().ok()
-        } else {
-            content.parse().ok()
-        }
+        self.evaluate_cell(row, col).parse().ok()
     }
 
     pub fn evaluate_count(&mut self, args: &str) -> String {
@@ -1285,130 +1275,6 @@ impl Spreadsheet {
             cell_value.contains(&criteria.replace('*', "").replace('?', ""))
         } else {
             cell_value == criteria
-        }
-    }
-
-    pub fn evaluate_shell(&mut self, args: &str, start_row: usize, start_col: usize) -> String {
-        // Parse the command argument - handle quoted strings (single or double quotes)
-        let command = if args.len() >= 2 {
-            let first_char = args.chars().next().unwrap();
-            let last_char = args.chars().last().unwrap();
-            if (first_char == '"' && last_char == '"') || (first_char == '\'' && last_char == '\'') {
-                args[1..args.len() - 1].to_string()
-            } else {
-                args.trim().to_string()
-            }
-        } else {
-            args.trim().to_string()
-        };
-
-        if command.is_empty() {
-            return "#ERROR".to_string();
-        }
-
-        // Execute the shell command
-        let output = if cfg!(target_os = "windows") {
-            std::process::Command::new("cmd")
-                .args(["/C", &command])
-                .output()
-        } else {
-            std::process::Command::new("sh")
-                .arg("-c")
-                .arg(&command)
-                .output()
-        };
-
-        match output {
-            Ok(output) => {
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    return format!("#ERROR: {}", stderr.trim());
-                }
-
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let output_text = stdout.trim();
-
-                if output_text.is_empty() {
-                    return "OK".to_string();
-                }
-
-                // Try to detect if output is tabular (multiple columns)
-                let lines: Vec<&str> = output_text.lines().collect();
-                if lines.is_empty() {
-                    return "OK".to_string();
-                }
-
-                // Check if it looks like a table (multiple columns separated by whitespace)
-                // Consider it tabular if at least 50% of non-empty lines have multiple columns
-                let non_empty_lines: Vec<&str> = lines.iter()
-                    .filter(|line| !line.trim().is_empty())
-                    .copied()
-                    .collect();
-                
-                if non_empty_lines.is_empty() {
-                    return "OK".to_string();
-                }
-
-                let multi_col_lines = non_empty_lines.iter()
-                    .filter(|line| {
-                        let parts: Vec<&str> = line.split_whitespace().collect();
-                        parts.len() > 1
-                    })
-                    .count();
-                
-                let is_tabular = multi_col_lines * 2 >= non_empty_lines.len(); // At least 50%
-
-                if is_tabular {
-                    // Parse as table - split by whitespace
-                    let mut current_row = start_row;
-                    let mut max_cols = 0;
-                    
-                    for line in lines {
-                        let trimmed = line.trim();
-                        if trimmed.is_empty() {
-                            continue;
-                        }
-                        
-                        let parts: Vec<&str> = trimmed.split_whitespace().collect();
-                        if !parts.is_empty() {
-                            max_cols = max_cols.max(parts.len());
-                            let mut current_col = start_col;
-                            for part in parts {
-                                // Only write if we're in the first row or if the cell is empty
-                                // This prevents overwriting existing data in subsequent rows
-                                if current_row == start_row || self.get_cell(current_row, current_col).is_empty() {
-                                    self.set_cell(current_row, current_col, part.to_string());
-                                }
-                                current_col += 1;
-                            }
-                            current_row += 1;
-                        }
-                    }
-                    
-                    // Update dimensions if needed
-                    if current_row > self.num_rows {
-                        self.num_rows = current_row;
-                    }
-                    if start_col + max_cols > self.num_cols {
-                        self.num_cols = start_col + max_cols;
-                    }
-                    "OK".to_string()
-                } else {
-                    // Simple text output - write to current cell
-                    // If it's multi-line but not tabular, join with spaces or keep as-is
-                    let text = if lines.len() > 1 {
-                        // For multi-line non-tabular output, join with newlines
-                        output_text.to_string()
-                    } else {
-                        output_text.to_string()
-                    };
-                    self.set_cell(start_row, start_col, text);
-                    "OK".to_string()
-                }
-            }
-            Err(e) => {
-                format!("#ERROR: {}", e)
-            }
         }
     }
 

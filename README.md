@@ -24,7 +24,7 @@
 - **Clipboard support** - Copy, cut, and paste with system clipboard integration
 - **Dark/Light mode** - Toggle between color themes with persistent settings
 - **Row/Column operations** - Select, insert, and delete entire rows or columns
-- **Shell integration** - Execute shell commands directly in cells with `=SHELL("command")`
+- **Shell integration** - Run commands from `=SHELL("command")` cells with a preview before applying output
 
 ## Installation
 
@@ -128,6 +128,7 @@ cat data.txt | xl
 | `Shift+R` | Row select mode |
 | `Shift+C` | Column select mode |
 | `:` | Command mode (vim-style) |
+| `:run` then `Enter` | Preview the selected SHELL cell |
 | `Ctrl/Cmd+C` | Copy |
 | `Ctrl/Cmd+X` | Cut |
 | `Ctrl/Cmd+V` | Paste |
@@ -201,7 +202,7 @@ Start any cell with `=` to enter a formula. Formulas are case-insensitive.
 - `VLOOKUP(value, range, col_index, [range_lookup])` - Vertical lookup
 
 **Special:**
-- `SHELL("command")` - Execute shell command and display output
+- `SHELL("command")` - Store a shell command in a cell. Select it and enter `:run` to preview the command. Use the arrow keys to scroll and press `r` to run it. Review the destination range and overwrite count, then press `a` to replace the formula and apply the output. `Esc` closes either preview.
 
 #### Formula Examples
 

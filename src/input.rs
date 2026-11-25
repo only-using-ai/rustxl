@@ -7,6 +7,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 
 use crate::constants::COLOR_PALETTE;
 use crate::settings;
+use crate::shell;
 use crate::spreadsheet::Spreadsheet;
 use crate::types::{DataType, RowColumnSelectMode, SaveFormat, TextAlignment, VerticalAlignment, VisualSubMode};
 use crate::ui;
@@ -43,6 +44,13 @@ pub fn run_app(
             match event::read() {
                 Ok(Event::Key(key)) => {
                     if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
+
+                    if spreadsheet.shell_prompt.is_some() {
+                        if key.modifiers.is_empty() {
+                            handle_shell_prompt(&mut spreadsheet, key.code, shell::run_command);
+                        }
                         continue;
                     }
 
@@ -840,9 +848,189 @@ fn handle_command_mode(spreadsheet: &mut Spreadsheet, code: KeyCode) -> bool {
     false
 }
 
+fn handle_shell_prompt(
+    spreadsheet: &mut Spreadsheet,
+    code: KeyCode,
+    runner: impl FnOnce(&str) -> Result<String, String>,
+) {
+    let Some(prompt) = &mut spreadsheet.shell_prompt else {
+        return;
+    };
+    match code {
+        KeyCode::Esc => spreadsheet.shell_prompt = None,
+        KeyCode::Up => prompt.scroll = prompt.scroll.saturating_sub(1),
+        KeyCode::Down => prompt.scroll = prompt.scroll.saturating_add(1),
+        KeyCode::Char('r') => spreadsheet.confirm_shell_run(runner),
+        KeyCode::Char('a') => spreadsheet.apply_shell_output(),
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shell::ShellStep;
+    use ratatui::backend::TestBackend;
+
+    fn open_shell_preview(sheet: &mut Spreadsheet) {
+        sheet.enter_command_mode();
+        for ch in "run".chars() {
+            handle_command_mode(sheet, KeyCode::Char(ch));
+        }
+        assert!(!handle_command_mode(sheet, KeyCode::Enter));
+        assert!(!sheet.command_mode);
+        assert!(matches!(
+            &sheet.shell_prompt.as_ref().unwrap().step,
+            ShellStep::Run { .. }
+        ));
+    }
+
+    fn press_shell_key(sheet: &mut Spreadsheet, code: KeyCode) {
+        handle_shell_prompt(sheet, code, |_| panic!("command must not run for this key"));
+    }
+
+    fn render_sheet(terminal: &mut Terminal<TestBackend>, sheet: &mut Spreadsheet) -> String {
+        terminal.draw(|frame| ui::render(frame, sheet)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn shell_import_evaluation_and_render_keep_formula_inert() {
+        let mut sheet = Spreadsheet::new();
+        let path = std::env::temp_dir().join(format!("xl-shell-import-{}.csv", std::process::id()));
+        std::fs::write(&path, "=SHELL(echo imported),keep\n=SUM(A1),\n").unwrap();
+        let import = sheet.load_from_file(path.to_str().unwrap());
+        std::fs::remove_file(path).unwrap();
+        import.unwrap();
+        assert_eq!(sheet.get_cell(0, 0), "=SHELL(echo imported)");
+        assert_eq!(sheet.get_cell(0, 1), "keep");
+        let cells = sheet.cells.clone();
+        let dimensions = (sheet.num_rows, sheet.num_cols);
+
+        assert_eq!(sheet.evaluate_cell(0, 0), "[SHELL]");
+        assert_eq!(sheet.evaluate_cell(1, 0), "0");
+        assert_eq!(
+            sheet.evaluate_formula("=IF(1=1,SHELL(echo nested),0)", 0, 1),
+            "[SHELL]"
+        );
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        assert!(render_sheet(&mut terminal, &mut sheet).contains("[SHELL]"));
+        assert_eq!(sheet.cells, cells);
+        assert_eq!((sheet.num_rows, sheet.num_cols), dimensions);
+        assert!(sheet.shell_prompt.is_none());
+    }
+
+    #[test]
+    fn shell_command_preview_scrolls_through_long_and_multiline_input() {
+        let mut sheet = Spreadsheet::new();
+        let command = format!("echo {}\necho last-line", "x".repeat(180));
+        sheet.set_cell(0, 0, format!("=sHeLl( \"{command}\" )"));
+        open_shell_preview(&mut sheet);
+
+        let mut terminal = Terminal::new(TestBackend::new(38, 5)).unwrap();
+        let initial = render_sheet(&mut terminal, &mut sheet);
+        assert!(initial.contains("echo x"));
+        assert!(!initial.contains("echo last-line"));
+        for _ in 0..10 {
+            press_shell_key(&mut sheet, KeyCode::Down);
+            render_sheet(&mut terminal, &mut sheet);
+        }
+        assert!(render_sheet(&mut terminal, &mut sheet).contains("echo last-line"));
+        press_shell_key(&mut sheet, KeyCode::Up);
+        press_shell_key(&mut sheet, KeyCode::Esc);
+        assert!(sheet.shell_prompt.is_none());
+        assert_eq!(sheet.get_cell(0, 0), format!("=sHeLl( \"{command}\" )"));
+    }
+
+    #[test]
+    fn shell_stages_ragged_output_until_apply() {
+        let mut sheet = Spreadsheet::new();
+        sheet.num_rows = 2;
+        sheet.num_cols = 3;
+        sheet.cursor_col = 1;
+        sheet.set_cell(0, 1, "=sHeLl( 'echo one\necho two' )".to_string());
+        sheet.set_cell(0, 2, "will replace".to_string());
+        sheet.set_cell(1, 2, "ragged gap".to_string());
+        let cells = sheet.cells.clone();
+        open_shell_preview(&mut sheet);
+        press_shell_key(&mut sheet, KeyCode::Char('a'));
+        press_shell_key(&mut sheet, KeyCode::Enter);
+
+        let mut calls = 0;
+        let runner = |command: &str| {
+            calls += 1;
+            assert_eq!(command, "echo one\necho two");
+            Ok("first second extra\nthird\nfourth fifth\n".to_string())
+        };
+        handle_shell_prompt(&mut sheet, KeyCode::Char('r'), runner);
+        assert_eq!(calls, 1);
+        press_shell_key(&mut sheet, KeyCode::Char('r'));
+        assert_eq!(sheet.cells, cells);
+        assert_eq!((sheet.num_rows, sheet.num_cols), (2, 3));
+
+        let mut terminal = Terminal::new(TestBackend::new(45, 8)).unwrap();
+        let preview = render_sheet(&mut terminal, &mut sheet);
+        assert!(preview.contains("Destination range B1:D3"));
+        assert!(preview.contains("Cells to write 6"));
+        assert!(preview.contains("Occupied cells to overwrite 2"));
+
+        press_shell_key(&mut sheet, KeyCode::Char('a'));
+        assert!(sheet.shell_prompt.is_none());
+        assert_eq!(sheet.get_cell(0, 1), "first");
+        assert_eq!(sheet.get_cell(0, 2), "second");
+        assert_eq!(sheet.get_cell(0, 3), "extra");
+        assert_eq!(sheet.get_cell(1, 1), "third");
+        assert_eq!(sheet.get_cell(1, 2), "ragged gap");
+        assert_eq!(sheet.get_cell(2, 1), "fourth");
+        assert_eq!(sheet.get_cell(2, 2), "fifth");
+        assert_eq!((sheet.num_rows, sheet.num_cols), (3, 4));
+    }
+
+    #[test]
+    fn shell_cancel_empty_output_and_failure_keep_sheet_intact() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "=SHELL(echo example)".to_string());
+        let cells = sheet.cells.clone();
+        let dimensions = (sheet.num_rows, sheet.num_cols);
+
+        open_shell_preview(&mut sheet);
+        handle_shell_prompt(&mut sheet, KeyCode::Char('r'), |_| Ok("one\ntwo".into()));
+        let ShellStep::Apply(output) = &sheet.shell_prompt.as_ref().unwrap().step else {
+            panic!("expected an output preview");
+        };
+        assert_eq!(output.range(), "A1");
+        assert_eq!(output.counts(&sheet), (1, 1));
+        press_shell_key(&mut sheet, KeyCode::Esc);
+
+        for (result, expected) in [
+            (Ok(" \n\t".into()), "Command produced no output."),
+            (Err("could not run".into()), "could not run"),
+        ] {
+            open_shell_preview(&mut sheet);
+            handle_shell_prompt(&mut sheet, KeyCode::Char('r'), |_| result);
+            assert!(matches!(
+                &sheet.shell_prompt.as_ref().unwrap().step,
+                ShellStep::Message(message) if message == expected
+            ));
+            press_shell_key(&mut sheet, KeyCode::Char('a'));
+            press_shell_key(&mut sheet, KeyCode::Esc);
+            assert!(sheet.shell_prompt.is_none());
+            assert_eq!(sheet.cells, cells);
+            assert_eq!((sheet.num_rows, sheet.num_cols), dimensions);
+        }
+
+        open_shell_preview(&mut sheet);
+        handle_shell_prompt(&mut sheet, KeyCode::Char('r'), |_| Ok("one\ntwo".into()));
+        press_shell_key(&mut sheet, KeyCode::Char('a'));
+        assert_eq!(sheet.get_cell(0, 0), "one\ntwo");
+        assert_eq!((sheet.num_rows, sheet.num_cols), dimensions);
+    }
 
     #[test]
     fn test_ready_mode_quit() {
