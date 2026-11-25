@@ -193,7 +193,7 @@ Inserting or deleting rows or columns updates references in surviving formulas. 
 - `COUNT(range)` - Count of numeric values
 - `COUNTA(range)` - Count of non-empty cells
 - `ROUND(value, decimals)` - Round to decimal places
-- `CORREL(range1, range2)` - Correlation coefficient
+- `CORREL(range1, range2)` - Correlation coefficient for corresponding positions where both ranges contain a number
 
 **Conditional:**
 - `IF(condition, true_value, false_value)` - Conditional logic
@@ -209,7 +209,7 @@ Inserting or deleting rows or columns updates references in surviving formulas. 
 - `LEN(text)` - Text length
 
 **Lookup:**
-- `VLOOKUP(value, range, col_index, [range_lookup])` - Vertical lookup
+- `VLOOKUP(value, range, col_index, [range_lookup])` - Vertical lookup. Use `FALSE` or `0` for an exact match. Use `TRUE`, a nonzero number, or omit the mode for an approximate match on sorted numeric keys.
 
 **Special:**
 - `SHELL("command")` - Store a shell command in a cell. Select it and enter `:run` to preview the command. Use the arrow keys to scroll and press `r` to run it. Review the destination range and overwrite count, then press `a` to replace the formula and apply the output. `Esc` closes either preview.

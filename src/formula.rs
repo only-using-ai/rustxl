@@ -305,12 +305,39 @@ impl<'sheet> FormulaEvaluator<'sheet> {
             return self.evaluate_median(inner, (row, col));
         }
 
-        // Try to parse as cell reference
-        if let Some(val) = self.get_cell_value(expr) {
-            return format!("{}", val);
+        if let Some((row, col)) = self.parse_cell_ref(expr) {
+            return self.evaluate_cell(row, col);
         }
 
         "#ERROR".to_string()
+    }
+
+    fn aggregate_argument<'arg>(
+        &mut self,
+        arg: &'arg str,
+    ) -> Result<impl Iterator<Item = AggregateInput<'arg>> + use<'arg>, ()> {
+        let arg = arg.trim();
+        let colon = formula_ref::top_level_delimiters(arg, b":").next();
+        let (single, range) = if let Some(colon) = colon {
+            let start = self.parse_cell_ref(&arg[..colon]);
+            let end = self.parse_cell_ref(&arg[colon + 1..]);
+            let (Some((sr, sc)), Some((er, ec))) = (start, end) else {
+                return Err(());
+            };
+            let rows = sr.min(er)..=sr.max(er);
+            let cols = sc.min(ec)..=sc.max(ec);
+            (None, Some((rows, cols)))
+        } else {
+            let input = match self.parse_cell_ref(arg) {
+                Some((row, col)) => AggregateInput::Cell(row, col),
+                None => AggregateInput::Scalar(arg),
+            };
+            (Some(input), None)
+        };
+        let cells = range.into_iter().flat_map(|(rows, cols)| {
+            rows.flat_map(move |row| cols.clone().map(move |col| AggregateInput::Cell(row, col)))
+        });
+        Ok(single.into_iter().chain(cells))
     }
 
     fn visit_aggregate_inputs<'args>(
@@ -319,26 +346,7 @@ impl<'sheet> FormulaEvaluator<'sheet> {
         mut visit: impl FnMut(&mut Self, AggregateInput<'args>),
     ) -> Result<(), ()> {
         for arg in self.split_function_args(args) {
-            let arg = arg.trim();
-            if let Some(colon) = formula_ref::top_level_delimiters(arg, b":").next() {
-                let start = self.parse_cell_ref(&arg[..colon]);
-                let end = self.parse_cell_ref(&arg[colon + 1..]);
-                let (Some((sr, sc)), Some((er, ec))) = (start, end) else {
-                    return Err(());
-                };
-                for row in sr.min(er)..=sr.max(er) {
-                    for col in sc.min(ec)..=sc.max(ec) {
-                        visit(self, AggregateInput::Cell(row, col));
-                        if self.error.is_some() {
-                            return Err(());
-                        }
-                    }
-                }
-            } else {
-                let input = match self.parse_cell_ref(arg) {
-                    Some((row, col)) => AggregateInput::Cell(row, col),
-                    None => AggregateInput::Scalar(arg),
-                };
+            for input in self.aggregate_argument(arg)? {
                 visit(self, input);
                 if self.error.is_some() {
                     return Err(());
@@ -351,18 +359,25 @@ impl<'sheet> FormulaEvaluator<'sheet> {
     fn visit_numeric_inputs(
         &mut self,
         args: &str,
-        (row, col): (usize, usize),
+        origin: (usize, usize),
         mut visit: impl FnMut(f64),
     ) -> Result<(), ()> {
         self.visit_aggregate_inputs(args, |evaluator, input| {
-            let value = match input {
-                AggregateInput::Cell(row, col) => evaluator.get_cell_value_at(row, col),
-                AggregateInput::Scalar(arg) => evaluator.evaluate_arg_as_number(arg, row, col),
-            };
-            if let Some(value) = value {
+            if let Some(value) = evaluator.numeric_input(input, origin) {
                 visit(value);
             }
         })
+    }
+
+    fn numeric_input(
+        &mut self,
+        input: AggregateInput<'_>,
+        (row, col): (usize, usize),
+    ) -> Option<f64> {
+        match input {
+            AggregateInput::Cell(row, col) => self.get_cell_value_at(row, col),
+            AggregateInput::Scalar(arg) => self.evaluate_arg_as_number(arg, row, col),
+        }
     }
 
     fn evaluate_sum(&mut self, args: &str, origin: (usize, usize)) -> String {
@@ -428,43 +443,48 @@ impl<'sheet> FormulaEvaluator<'sheet> {
     }
 
     fn evaluate_correl(&mut self, args: &str, origin: (usize, usize)) -> String {
-        // CORREL expects two ranges: CORREL(range1, range2)
         let parts = self.split_function_args(args);
-        if parts.len() != 2 {
+        let [first, second] = parts.as_slice() else {
             return "#ERROR".to_string();
-        }
-
-        let range1 = parts[0].trim();
-        let range2 = parts[1].trim();
-
-        // Collect values from both ranges
-        let values1 = self.collect_range_values(range1, origin);
-        let values2 = self.collect_range_values(range2, origin);
-
-        let (values1, values2) = match (values1, values2) {
-            (Some(v1), Some(v2)) => (v1, v2),
-            _ => return "#ERROR".to_string(),
+        };
+        let first = self.aggregate_argument(first);
+        let second = self.aggregate_argument(second);
+        let (Ok(mut first), Ok(mut second)) = (first, second) else {
+            return "#ERROR".to_string();
         };
 
-        // Both ranges must have the same length
-        if values1.len() != values2.len() || values1.is_empty() {
+        let mut pairs = Vec::new();
+        let mut equal_lengths = true;
+        loop {
+            let (left, right) = (first.next(), second.next());
+            if left.is_none() && right.is_none() {
+                break;
+            }
+            // Track the range lengths before filtering out nonnumeric values.
+            equal_lengths &= left.is_some() && right.is_some();
+            let left = left.and_then(|input| self.numeric_input(input, origin));
+            let right = right.and_then(|input| self.numeric_input(input, origin));
+            if self.error.is_some() {
+                return "#ERROR".to_string();
+            }
+            if let Some(pair) = left.zip(right) {
+                pairs.push(pair);
+            }
+        }
+        if !equal_lengths || pairs.is_empty() {
             return "#ERROR".to_string();
         }
 
-        let n = values1.len() as f64;
-
-        // Calculate means
-        let mean1: f64 = values1.iter().sum::<f64>() / n;
-        let mean2: f64 = values2.iter().sum::<f64>() / n;
-
-        // Calculate correlation coefficient
+        let n = pairs.len() as f64;
+        let mean1 = pairs.iter().map(|(left, _)| left).sum::<f64>() / n;
+        let mean2 = pairs.iter().map(|(_, right)| right).sum::<f64>() / n;
         let mut covariance = 0.0;
         let mut var1 = 0.0;
         let mut var2 = 0.0;
 
-        for i in 0..values1.len() {
-            let diff1 = values1[i] - mean1;
-            let diff2 = values2[i] - mean2;
+        for (left, right) in pairs {
+            let diff1 = left - mean1;
+            let diff2 = right - mean2;
             covariance += diff1 * diff2;
             var1 += diff1 * diff1;
             var2 += diff2 * diff2;
@@ -479,13 +499,6 @@ impl<'sheet> FormulaEvaluator<'sheet> {
 
         // Format with reasonable precision
         format!("{:.6}", correlation)
-    }
-
-    fn collect_range_values(&mut self, range: &str, origin: (usize, usize)) -> Option<Vec<f64>> {
-        let mut values = Vec::new();
-        self.visit_numeric_inputs(range, origin, |value| values.push(value))
-            .ok()?;
-        Some(values)
     }
 
     pub fn evaluate_if(&mut self, args: &str, current_row: usize, current_col: usize) -> String {
@@ -619,11 +632,6 @@ impl<'sheet> FormulaEvaluator<'sheet> {
             self.evaluate_cell(row, col);
         }
         content
-    }
-
-    pub fn get_cell_value(&mut self, cell_ref: &str) -> Option<f64> {
-        let (row, col) = self.parse_cell_ref(cell_ref)?;
-        self.get_cell_value_at(row, col)
     }
 
     pub fn get_cell_value_at(&mut self, row: usize, col: usize) -> Option<f64> {
@@ -913,19 +921,6 @@ impl<'sheet> FormulaEvaluator<'sheet> {
             None => return "#ERROR".to_string(),
         };
 
-        // Remove quotes if present
-        let text = if text.len() >= 2 {
-            let first_char = text.chars().next().unwrap();
-            let last_char = text.chars().last().unwrap();
-            if (first_char == '"' && last_char == '"') || (first_char == '\'' && last_char == '\'') {
-                text[1..text.len() - 1].to_string()
-            } else {
-                text
-            }
-        } else {
-            text
-        };
-
         let chars: Vec<char> = text.chars().collect();
         let end = num_chars.min(chars.len());
         chars[..end].iter().collect()
@@ -944,19 +939,6 @@ impl<'sheet> FormulaEvaluator<'sheet> {
         let num_chars = match self.evaluate_arg_as_number(num_chars_str, current_row, current_col) {
             Some(n) => n as usize,
             None => return "#ERROR".to_string(),
-        };
-
-        // Remove quotes if present
-        let text = if text.len() >= 2 {
-            let first_char = text.chars().next().unwrap();
-            let last_char = text.chars().last().unwrap();
-            if (first_char == '"' && last_char == '"') || (first_char == '\'' && last_char == '\'') {
-                text[1..text.len() - 1].to_string()
-            } else {
-                text
-            }
-        } else {
-            text
         };
 
         let chars: Vec<char> = text.chars().collect();
@@ -988,19 +970,6 @@ impl<'sheet> FormulaEvaluator<'sheet> {
             None => return "#ERROR".to_string(),
         };
 
-        // Remove quotes if present
-        let text = if text.len() >= 2 {
-            let first_char = text.chars().next().unwrap();
-            let last_char = text.chars().last().unwrap();
-            if (first_char == '"' && last_char == '"') || (first_char == '\'' && last_char == '\'') {
-                text[1..text.len() - 1].to_string()
-            } else {
-                text
-            }
-        } else {
-            text
-        };
-
         let chars: Vec<char> = text.chars().collect();
         if start_num == 0 || start_num > chars.len() {
             return String::new();
@@ -1014,19 +983,6 @@ impl<'sheet> FormulaEvaluator<'sheet> {
     pub fn evaluate_len(&mut self, args: &str, current_row: usize, current_col: usize) -> String {
         let text = self.evaluate_arg(args.trim(), current_row, current_col);
 
-        // Remove quotes if present
-        let text = if text.len() >= 2 {
-            let first_char = text.chars().next().unwrap();
-            let last_char = text.chars().last().unwrap();
-            if (first_char == '"' && last_char == '"') || (first_char == '\'' && last_char == '\'') {
-                text[1..text.len() - 1].to_string()
-            } else {
-                text
-            }
-        } else {
-            text
-        };
-
         format!("{}", text.chars().count())
     }
 
@@ -1039,10 +995,11 @@ impl<'sheet> FormulaEvaluator<'sheet> {
         let lookup_value_str = parts[0].trim();
         let table_range = parts[1].trim();
         let col_index_num_str = parts[2].trim();
-        let range_lookup = if parts.len() == 4 {
-            self.evaluate_arg_as_number(parts[3].trim(), current_row, current_col)
-                .map(|v| v.abs() < f64::EPSILON)
-                .unwrap_or(true)
+        let approximate = if let Some(mode) = parts.get(3) {
+            let Some(approximate) = self.vlookup_mode(mode, current_row, current_col) else {
+                return "#ERROR".to_string();
+            };
+            approximate
         } else {
             true
         };
@@ -1084,7 +1041,7 @@ impl<'sheet> FormulaEvaluator<'sheet> {
         for (row, col) in &table_cells {
             if *col == target_col {
                 let cell_value = self.raw_cell_with_dependency(*row, *col);
-                if range_lookup {
+                if approximate {
                     // Approximate match - find the largest value <= lookup_value
                     if let Some(cell_num) = cell_value.parse::<f64>().ok() {
                         if let Some(lookup_num) = lookup_value.parse::<f64>().ok() {
@@ -1102,7 +1059,7 @@ impl<'sheet> FormulaEvaluator<'sheet> {
                     // Exact match
                     if let Some(cell_num) = cell_value.parse::<f64>().ok() {
                         if let Some(lookup_num) = lookup_value.parse::<f64>().ok() {
-                            if (cell_num - lookup_num).abs() < f64::EPSILON {
+                            if cell_num == lookup_num {
                                 matching_row = Some(*row);
                                 break;
                             }
@@ -1121,6 +1078,24 @@ impl<'sheet> FormulaEvaluator<'sheet> {
         } else {
             "#N/A".to_string()
         }
+    }
+
+    fn vlookup_mode(&mut self, mode: &str, row: usize, col: usize) -> Option<bool> {
+        if formula_ref::quoted_literal(mode.trim()).is_some() {
+            return None;
+        }
+        let value = self.evaluate_arg(mode, row, col);
+        if value.eq_ignore_ascii_case("TRUE") {
+            return Some(true);
+        }
+        if value.eq_ignore_ascii_case("FALSE") {
+            return Some(false);
+        }
+        value
+            .parse::<f64>()
+            .ok()
+            .filter(|number| number.is_finite())
+            .map(|number| number != 0.0)
     }
 
     fn collect_range_cells(&mut self, range: &str) -> Vec<(usize, usize)> {
@@ -1328,19 +1303,6 @@ impl<'sheet> FormulaEvaluator<'sheet> {
 
         let text = self.evaluate_arg(parts[0].trim(), current_row, current_col);
 
-        // Remove quotes if present
-        let text = if text.len() >= 2 {
-            let first_char = text.chars().next().unwrap();
-            let last_char = text.chars().last().unwrap();
-            if (first_char == '"' && last_char == '"') || (first_char == '\'' && last_char == '\'') {
-                text[1..text.len() - 1].to_string()
-            } else {
-                text
-            }
-        } else {
-            text
-        };
-
         // TRIM removes leading and trailing spaces, and reduces multiple spaces to single spaces
         let trimmed: String = text
             .split_whitespace()
@@ -1357,19 +1319,6 @@ impl<'sheet> FormulaEvaluator<'sheet> {
         }
 
         let text = self.evaluate_arg(parts[0].trim(), current_row, current_col);
-
-        // Remove quotes if present
-        let text = if text.len() >= 2 {
-            let first_char = text.chars().next().unwrap();
-            let last_char = text.chars().last().unwrap();
-            if (first_char == '"' && last_char == '"') || (first_char == '\'' && last_char == '\'') {
-                text[1..text.len() - 1].to_string()
-            } else {
-                text
-            }
-        } else {
-            text
-        };
 
         text.to_uppercase()
     }
@@ -1421,19 +1370,6 @@ impl<'sheet> FormulaEvaluator<'sheet> {
         }
 
         let text = self.evaluate_arg(parts[0].trim(), current_row, current_col);
-
-        // Remove quotes if present
-        let text = if text.len() >= 2 {
-            let first_char = text.chars().next().unwrap();
-            let last_char = text.chars().last().unwrap();
-            if (first_char == '"' && last_char == '"') || (first_char == '\'' && last_char == '\'') {
-                text[1..text.len() - 1].to_string()
-            } else {
-                text
-            }
-        } else {
-            text
-        };
 
         text.to_lowercase()
     }
@@ -1579,19 +1515,6 @@ impl<'sheet> FormulaEvaluator<'sheet> {
         }
 
         let text = self.evaluate_arg(parts[0].trim(), current_row, current_col);
-
-        // Remove quotes if present
-        let text = if text.len() >= 2 {
-            let first_char = text.chars().next().unwrap();
-            let last_char = text.chars().last().unwrap();
-            if (first_char == '"' && last_char == '"') || (first_char == '\'' && last_char == '\'') {
-                text[1..text.len() - 1].to_string()
-            } else {
-                text
-            }
-        } else {
-            text
-        };
 
         // PROPER converts to title case: first letter of each word uppercase, rest lowercase
         let mut result = String::new();
@@ -2094,6 +2017,45 @@ mod tests {
     }
 
     #[test]
+    fn correl_pairs_cells_before_skipping_blank_and_text_values() {
+        let mut sheet = Spreadsheet::new();
+        for (row, (left, right)) in [
+            ("1", "4"),
+            ("2", ""),
+            ("", "10"),
+            ("4", "1"),
+            ("5", "=IF(1,\"missing\",0)"),
+            ("missing", "-1"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            sheet.set_cell(row, 0, left.into());
+            sheet.set_cell(row, 1, right.into());
+        }
+
+        for (formula, expected) in [
+            ("=CORREL(A1:A6,B1:B6)", "-1.000000"),
+            ("=CORREL(A6:A1,B1:B6)", "-1.000000"),
+            // The numeric counts agree even though the range lengths differ.
+            ("=CORREL(A1:A4,B1:B5)", "#ERROR"),
+        ] {
+            assert_eq!(sheet.evaluate_formula(formula, 0, 2), expected, "{formula}");
+        }
+
+        sheet.set_cell(3, 0, "1".into());
+        assert_eq!(
+            sheet.evaluate_formula("=CORREL(A1:A6,B1:B6)", 0, 2),
+            "#DIV/0!"
+        );
+        sheet.set_cell(5, 1, "=#REF!".into());
+        assert_eq!(
+            sheet.evaluate_formula("=CORREL(A1:A4,B1:B6)", 0, 2),
+            "#REF!"
+        );
+    }
+
+    #[test]
     fn test_evaluate_count() {
         let mut sheet = Spreadsheet::new();
         sheet.set_cell(0, 0, "10".to_string());
@@ -2194,6 +2156,41 @@ mod tests {
     }
 
     #[test]
+    fn direct_references_use_the_evaluated_value() {
+        let mut sheet = Spreadsheet::new();
+        for (row, (source, value)) in [
+            ("Low", "Low"),
+            (r#"=IF(1,"a,b",0)"#, "a,b"),
+            ("001", "001"),
+            ("", ""),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            sheet.set_cell(row, 0, source.into());
+            sheet.set_cell(row, 1, format!("=$a${}", row + 1));
+            assert_eq!(sheet.evaluate_cell(row, 1), value);
+        }
+        assert_eq!(sheet.evaluate_formula("=B3+1", 0, 2), "2");
+    }
+
+    #[test]
+    fn quoted_arguments_preserve_delimiters_and_literal_quotes() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "\"a,b\"".into());
+        for (formula, expected) in [
+            (r#"=CONCATENATE("a,b","c")"#, "a,bc"),
+            (r#"=CONCAT('a),b',UPPER("c(,d"))"#, "a),bC(,D"),
+            (r#"=UPPER('"a,b"')"#, "\"A,B\""),
+            (r#"=LEFT('"A1,B2"',1)"#, "\""),
+            (r#"=LEN('"a,b"')"#, "5"),
+            ("=LEN(A1)", "5"),
+        ] {
+            assert_eq!(sheet.evaluate_formula(formula, 0, 1), expected, "{formula}");
+        }
+    }
+
+    #[test]
     fn test_evaluate_left() {
         let mut sheet = Spreadsheet::new();
         assert_eq!(sheet.evaluate_formula("=LEFT(\"Hello World\",5)", 0, 0), "Hello");
@@ -2264,6 +2261,51 @@ mod tests {
         sheet.set_cell(1, 0, "Banana".to_string());
         sheet.set_cell(1, 1, "Yellow".to_string());
         assert_eq!(sheet.evaluate_formula("=VLOOKUP(\"Banana\",A1:B2,2)", 0, 0), "Yellow");
+    }
+
+    #[test]
+    fn vlookup_uses_exact_and_approximate_modes() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "10".into());
+        sheet.set_cell(0, 1, "Low".into());
+        sheet.set_cell(1, 0, "20".into());
+        sheet.set_cell(1, 1, "High".into());
+        sheet.set_cell(0, 2, "=IF(1,FALSE,TRUE)".into());
+
+        for (mode, middle, above) in [
+            (",FALSE", "#N/A", "#N/A"),
+            (",0", "#N/A", "#N/A"),
+            (",C1", "#N/A", "#N/A"),
+            (",tRuE", "Low", "High"),
+            (",1", "Low", "High"),
+            (",-0.1", "Low", "High"),
+            ("", "Low", "High"),
+        ] {
+            for (key, expected) in [(9, "#N/A"), (10, "Low"), (15, middle), (21, above)] {
+                let formula = format!("=VLOOKUP({key},A1:B2,2{mode})");
+                assert_eq!(
+                    sheet.evaluate_formula(&formula, 0, 3),
+                    expected,
+                    "{formula}"
+                );
+            }
+        }
+
+        for mode in ["", "MAYBE", "NaN", "\"TRUE\""] {
+            let formula = format!("=VLOOKUP(10,A1:B2,2,{mode})");
+            assert_eq!(
+                sheet.evaluate_formula(&formula, 0, 3),
+                "#ERROR",
+                "{formula}"
+            );
+        }
+
+        sheet.set_cell(0, 0, "0".into());
+        sheet.set_cell(1, 0, "0.0000000000000001".into());
+        assert_eq!(
+            sheet.evaluate_formula("=VLOOKUP(0.0000000000000001,A1:B2,2,FALSE)", 0, 3),
+            "High"
+        );
     }
 
     #[test]
