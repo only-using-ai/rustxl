@@ -151,7 +151,7 @@ mod tests {
     use super::*;
     use crate::constants::{DEFAULT_COLS, DEFAULT_ROWS};
     use crate::spreadsheet::ClipboardData;
-    use crate::types::RowColumnSelectMode;
+    use crate::types::{RowColumnSelectMode, StdinFormat};
     use crate::update::UpdateInfo;
     use std::io::Write;
 
@@ -302,7 +302,10 @@ mod tests {
     #[test]
     fn csv_and_tsv_round_trip_raw_cells() {
         let directory = TestDirectory::new();
-        for (format, extension) in [(SaveFormat::Csv, "csv"), (SaveFormat::Tsv, "tsv")] {
+        for (format, extension, stdin_format) in [
+            (SaveFormat::Csv, "csv", StdinFormat::Csv),
+            (SaveFormat::Tsv, "tsv", StdinFormat::Tsv),
+        ] {
             let mut original = Spreadsheet::new();
             let base = directory.0.join("data");
             let path = base.with_extension(extension);
@@ -319,6 +322,37 @@ mod tests {
             let mut loaded = Spreadsheet::new();
             loaded.load_from_file(path.to_str().unwrap()).unwrap();
             assert_eq!(loaded.cells, original.cells);
+
+            let data = fs::read(&path).unwrap();
+            for mode in [stdin_format, StdinFormat::Auto] {
+                let mut piped = Spreadsheet::new();
+                piped.load_from_buffer(&data, mode).unwrap();
+                assert_eq!(piped.cells, loaded.cells);
+                assert_eq!(
+                    (piped.num_rows, piped.num_cols),
+                    (loaded.num_rows, loaded.num_cols)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn delimited_input_errors_match_for_files_and_pipes() {
+        let directory = TestDirectory::new();
+        for (extension, format, data) in [
+            ("csv", StdinFormat::Csv, b"a,b\nx\n".as_slice()),
+            ("tsv", StdinFormat::Tsv, b"a\tb\nx\t\xff\n".as_slice()),
+        ] {
+            let path = directory.0.join("bad").with_extension(extension);
+            fs::write(&path, data).unwrap();
+
+            let mut sheet = Spreadsheet::new();
+            sheet.set_cell(0, 0, "old value".into());
+            let file_error = sheet.load_from_file(path.to_str().unwrap()).unwrap_err();
+            let pipe_error = sheet.load_from_buffer(data, format).unwrap_err();
+            assert_eq!(pipe_error.kind(), file_error.kind());
+            assert_eq!(pipe_error.to_string(), file_error.to_string());
+            assert_eq!(sheet.get_cell(0, 0), "old value");
         }
     }
 
