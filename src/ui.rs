@@ -15,7 +15,7 @@ use crate::constants::{
     DARK_GRID_COLOR, DARK_HEADER_BG, DARK_HEADER_FG, DARK_REF_RANGE_BG, DARK_REF_SELECTION_BG,
     DARK_SELECTED_BG, DARK_SELECTED_HEADER_BG, DARK_FIND_MATCH_BG,
 };
-use crate::{shell::ShellStep, spreadsheet::Spreadsheet};
+use crate::{formula::FormulaEvaluator, shell::ShellStep, spreadsheet::Spreadsheet};
 use crate::types::{DataType, RowColumnSelectMode, SaveFormat, TextAlignment, VerticalAlignment, VisualSubMode};
 
 fn format_cell_by_type(value: &str, data_type: DataType) -> String {
@@ -359,7 +359,7 @@ fn render_autocomplete(f: &mut Frame, spreadsheet: &Spreadsheet, area: Rect) {
 
 fn render_grid(
     f: &mut Frame,
-    spreadsheet: &mut Spreadsheet,
+    spreadsheet: &Spreadsheet,
     area: Rect,
     visible_cols: usize,
     visible_rows: usize,
@@ -405,6 +405,7 @@ fn render_grid(
     let header = Row::new(header_cells).height(1);
 
     let mut rows = Vec::new();
+    let mut formulas = FormulaEvaluator::new(spreadsheet);
     for row in spreadsheet.scroll_row..spreadsheet.scroll_row + visible_rows {
         if row >= spreadsheet.num_rows {
             break;
@@ -442,7 +443,7 @@ fn render_grid(
             }
 
             let is_cursor = row == spreadsheet.cursor_row && col == spreadsheet.cursor_col;
-            let evaluated = spreadsheet.evaluate_cell(row, col);
+            let evaluated = formulas.evaluate(row, col);
 
             let cell_style = spreadsheet.get_cell_style(row, col);
             
