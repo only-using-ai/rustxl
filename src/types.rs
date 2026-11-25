@@ -27,7 +27,7 @@ pub enum DataType {
     Time,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq)]
 pub struct CellStyle {
     pub fg: Option<Color>,
     pub bg: Option<Color>,
@@ -54,6 +54,14 @@ pub enum VisualSubMode {
 pub enum SaveFormat {
     Csv,
     Tsv,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum StdinFormat {
+    Auto,
+    Csv,
+    Tsv,
+    Whitespace,
 }
 
 #[derive(Clone, Copy, PartialEq)]

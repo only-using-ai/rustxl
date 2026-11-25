@@ -24,7 +24,7 @@
 - **Clipboard support** - Copy, cut, and paste with system clipboard integration
 - **Dark/Light mode** - Toggle between color themes with persistent settings
 - **Row/Column operations** - Select, insert, and delete entire rows or columns
-- **Shell integration** - Execute shell commands directly in cells with `=SHELL("command")`
+- **Shell integration** - Run commands from `=SHELL("command")` cells with a preview before applying output
 
 ## Installation
 
@@ -107,8 +107,16 @@ xl --file spreadsheet.xlsx
 
 # Pipe data from another command
 ls -la | xl
-cat data.txt | xl
+cat data.csv | xl --stdin-format csv
+cat data.tsv | xl --stdin-format tsv
 ```
+
+Piped input defaults to `--stdin-format auto`. It looks for two or more fields
+with a consistent width across records and prefers TSV if both delimiters fit.
+Otherwise it splits command output on whitespace. Select `csv` or `tsv` for
+single-column or ambiguous data, or to receive the same parse errors as opening
+a file. Select `whitespace` to split command output that resembles CSV or TSV.
+`--file` opens a file directly and skips stdin.
 
 ### Keyboard Shortcuts
 
@@ -128,11 +136,19 @@ cat data.txt | xl
 | `Shift+R` | Row select mode |
 | `Shift+C` | Column select mode |
 | `:` | Command mode (vim-style) |
+| `:run` then `Enter` | Preview the selected SHELL cell |
 | `Ctrl/Cmd+C` | Copy |
 | `Ctrl/Cmd+X` | Cut |
 | `Ctrl/Cmd+V` | Paste |
 | `Alt+Arrow` | Jump to data boundary |
 | `q` | Quit |
+
+Paste uses the current system clipboard. RustXL preserves cell styles when it
+recognizes its own copied data. With desktop clipboard access, Cut moves cells
+only when RustXL can verify that its clipboard entry is still current. The
+macOS and Windows adapters support that check. The Linux adapter falls back
+to copy when it cannot verify ownership. Cut also works within RustXL when
+there is no desktop clipboard connection.
 
 #### Edit Mode
 
@@ -172,6 +188,8 @@ cat data.txt | xl
 
 Start any cell with `=` to enter a formula. Formulas are case-insensitive.
 
+Inserting or deleting rows or columns updates references in surviving formulas. Ranges expand around insertions inside them and shrink when part of a range is deleted. A deleted reference shows `#REF!` if its cell or entire range is gone. Circular references show `#CYCLE!`.
+
 #### Supported Functions
 
 **Math & Statistics:**
@@ -182,7 +200,7 @@ Start any cell with `=` to enter a formula. Formulas are case-insensitive.
 - `COUNT(range)` - Count of numeric values
 - `COUNTA(range)` - Count of non-empty cells
 - `ROUND(value, decimals)` - Round to decimal places
-- `CORREL(range1, range2)` - Correlation coefficient
+- `CORREL(range1, range2)` - Correlation coefficient for corresponding positions where both ranges contain a number
 
 **Conditional:**
 - `IF(condition, true_value, false_value)` - Conditional logic
@@ -198,10 +216,10 @@ Start any cell with `=` to enter a formula. Formulas are case-insensitive.
 - `LEN(text)` - Text length
 
 **Lookup:**
-- `VLOOKUP(value, range, col_index, [range_lookup])` - Vertical lookup
+- `VLOOKUP(value, range, col_index, [range_lookup])` - Vertical lookup. Use `FALSE` or `0` for an exact match. Use `TRUE`, a nonzero number, or omit the mode for an approximate match on sorted numeric keys.
 
 **Special:**
-- `SHELL("command")` - Execute shell command and display output
+- `SHELL("command")` - Store a shell command in a cell. Select it and enter `:run` to preview the command. Use the arrow keys to scroll and press `r` to run it. Review the destination range and overwrite count, then press `a` to replace the formula and apply the output. `Esc` closes either preview.
 
 #### Formula Examples
 

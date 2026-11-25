@@ -3171,12 +3171,17 @@ dependencies = [
  "csv",
  "dirs",
  "flate2",
+ "libc",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
  "ratatui",
  "reqwest",
  "semver",
  "serde",
  "serde_json",
  "tar",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

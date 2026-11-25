@@ -1,20 +1,82 @@
 use std::collections::HashMap;
+use std::io::{self, Read};
 
 use ratatui::layout::Rect;
 
+use crate::clipboard::{
+    ClipboardBackend, ClipboardRead, ClipboardText, Generation, Publication, export_token,
+};
 use crate::constants::{DEFAULT_COLS, DEFAULT_ROWS};
-use crate::types::{CellStyle, RowColumnSelectMode, SaveFormat, VisualSubMode};
+use crate::formula::FormulaEvaluator;
+use crate::formula_ref::{self, Axis, Edit};
+use crate::shell::ShellPrompt;
+#[cfg(test)]
+use crate::sparse_ui_probe::{self, Work};
+use crate::types::{CellStyle, RowColumnSelectMode, SaveFormat, StdinFormat, VisualSubMode};
 use crate::update::UpdateInfo;
 
 /// Represents copied/cut cell data with relative positions
-#[derive(Clone)]
 pub struct ClipboardData {
     /// Cell data: ((relative_row, relative_col), value, style)
-    pub cells: Vec<((usize, usize), String, Option<CellStyle>)>,
-    /// Whether this was a cut operation (cells should be cleared on paste)
-    pub is_cut: bool,
-    /// Original position of the cut (for clearing on paste)
-    pub cut_origin: Option<(usize, usize)>,
+    cells: Vec<((usize, usize), String, Option<CellStyle>)>,
+    origin: (usize, usize),
+    height: usize,
+    width: usize,
+    action: ClipboardAction,
+    export: ClipboardExport,
+}
+
+#[derive(PartialEq)]
+enum ClipboardAction {
+    Copy,
+    Cut,
+    StaleCut,
+}
+
+enum ClipboardExport {
+    Local,
+    Failed,
+    Published {
+        token: String,
+        generation: Option<Generation>,
+    },
+}
+
+impl ClipboardData {
+    fn plain_text(&self) -> String {
+        let mut text = String::new();
+        let mut cells = self.cells.iter().peekable();
+        for row in 0..self.height {
+            if row > 0 {
+                text.push('\n');
+            }
+            for col in 0..self.width {
+                if col > 0 {
+                    text.push('\t');
+                }
+                if let Some((_, value, _)) = cells.next_if(|cell| cell.0 == (row, col)) {
+                    text.push_str(value);
+                }
+            }
+        }
+        text
+    }
+
+    fn matches_export(&self, entry: &ClipboardText, observed: Option<Generation>) -> bool {
+        match &self.export {
+            ClipboardExport::Published { token, generation } => {
+                (generation.is_none() || observed.is_none() || *generation == observed)
+                    && entry.token.as_ref() == Some(token)
+                    && self.plain_text() == entry.text
+            }
+            _ => false,
+        }
+    }
+
+    fn owns_publication(&self, observed: Option<Generation>) -> bool {
+        matches!(self.export, ClipboardExport::Published { generation: Some(generation), .. }
+            if Some(generation) == observed)
+    }
 }
 
 pub struct Spreadsheet {
@@ -65,10 +127,12 @@ pub struct Spreadsheet {
     pub find_matches: Vec<(usize, usize)>, // List of (row, col) matching the query
     // Clipboard (internal for cut tracking)
     pub clipboard_data: Option<ClipboardData>,
+    pub clipboard_message: Option<&'static str>,
     // Command mode (vim-style :command)
     pub command_mode: bool,
     pub command_buffer: String,
     pub command_message: Option<String>,
+    pub shell_prompt: Option<ShellPrompt>,
     // Update mode
     pub update_available: Option<UpdateInfo>,
     pub update_prompt_shown: bool,
@@ -82,6 +146,8 @@ pub struct Spreadsheet {
     pub formula_suggestion_index: usize,
     pub formula_prefix: String,
 }
+
+pub type SelectionStats = (usize, usize, usize, f64);
 
 impl Spreadsheet {
     pub fn new() -> Self {
@@ -123,9 +189,11 @@ impl Spreadsheet {
             find_query: String::new(),
             find_matches: Vec::new(),
             clipboard_data: None,
+            clipboard_message: None,
             command_mode: false,
             command_buffer: String::new(),
             command_message: None,
+            shell_prompt: None,
             update_available: None,
             update_prompt_shown: false,
             update_in_progress: false,
@@ -204,6 +272,14 @@ impl Spreadsheet {
             return true; // Signal to quit
         }
 
+        if cmd == "RUN" {
+            match self.begin_shell_run() {
+                Ok(()) => self.exit_command_mode(),
+                Err(message) => self.command_message = Some(message.to_string()),
+            }
+            return false;
+        }
+
         // Try to parse as cell reference
         if let Some((row, col)) = Self::parse_cell_reference(&cmd) {
             if row < self.num_rows && col < self.num_cols {
@@ -242,16 +318,17 @@ impl Spreadsheet {
         }
 
         let query_lower = self.find_query.to_lowercase();
-        
-        // Search through all cells
-        for row in 0..self.num_rows {
-            for col in 0..self.num_cols {
-                let content = self.get_cell(row, col);
-                if !content.is_empty() && content.to_lowercase().contains(&query_lower) {
-                    self.find_matches.push((row, col));
-                }
-            }
-        }
+        self.find_matches
+            .extend(self.cells.iter().filter_map(|(&(row, col), content)| {
+                #[cfg(test)]
+                sparse_ui_probe::record(Work::FindCandidate);
+                (row < self.num_rows
+                    && col < self.num_cols
+                    && !content.is_empty()
+                    && content.to_lowercase().contains(&query_lower))
+                .then_some((row, col))
+            }));
+        self.find_matches.sort_unstable();
 
         // Move cursor to first match if any
         if let Some(&(row, col)) = self.find_matches.first() {
@@ -261,137 +338,185 @@ impl Spreadsheet {
     }
 
     pub fn is_find_match(&self, row: usize, col: usize) -> bool {
-        self.find_mode && self.find_matches.contains(&(row, col))
+        self.find_mode
+            && self
+                .find_matches
+                .binary_search_by(|position| {
+                    #[cfg(test)]
+                    sparse_ui_probe::record(Work::HighlightComparison);
+                    position.cmp(&(row, col))
+                })
+                .is_ok()
     }
 
     /// Copy the current selection (or single cell) to clipboard
-    pub fn copy_selection(&mut self) {
-        self.copy_or_cut_selection(false);
+    pub fn copy_selection(&mut self, clipboard: &mut impl ClipboardBackend) {
+        self.copy_or_cut_selection(false, clipboard);
     }
 
     /// Cut the current selection (or single cell) - copies and marks for deletion on paste
-    pub fn cut_selection(&mut self) {
-        self.copy_or_cut_selection(true);
+    pub fn cut_selection(&mut self, clipboard: &mut impl ClipboardBackend) {
+        self.copy_or_cut_selection(true, clipboard);
     }
 
-    fn copy_or_cut_selection(&mut self, is_cut: bool) {
-        // Determine the range to copy
-        let (min_row, min_col, max_row, max_col) = if let Some(((r1, c1), (r2, c2))) = self.get_selection_range() {
-            (r1, c1, r2, c2)
+    fn copy_or_cut_selection(&mut self, is_cut: bool, clipboard: &mut impl ClipboardBackend) {
+        let mut snapshot = self.capture_clipboard(is_cut);
+        let token = export_token();
+        snapshot.export = match clipboard.publish(&snapshot.plain_text(), &token) {
+            Publication::Offline => ClipboardExport::Local,
+            Publication::Failed => ClipboardExport::Failed,
+            Publication::Published(generation) => ClipboardExport::Published { token, generation },
+        };
+        self.clipboard_data = Some(snapshot);
+    }
+
+    pub(crate) fn capture_clipboard(&self, is_cut: bool) -> ClipboardData {
+        let (origin, end) = if let Some(range) = self.get_selection_range() {
+            range
         } else if let Some((min_row, max_row)) = self.selected_rows {
-            (min_row, 0, max_row, self.num_cols - 1)
+            ((min_row, 0), (max_row, self.num_cols - 1))
         } else if let Some((min_col, max_col)) = self.selected_cols {
-            (0, min_col, self.num_rows - 1, max_col)
+            ((0, min_col), (self.num_rows - 1, max_col))
         } else {
-            // Single cell
-            (self.cursor_row, self.cursor_col, self.cursor_row, self.cursor_col)
+            let position = (self.cursor_row, self.cursor_col);
+            (position, position)
         };
 
-        // Collect cell data with relative positions
-        let mut cells_data = Vec::new();
-        for row in min_row..=max_row {
-            for col in min_col..=max_col {
-                let rel_row = row - min_row;
-                let rel_col = col - min_col;
-                let value = self.get_cell(row, col).to_string();
-                let style = self.cell_styles.get(&(row, col)).copied();
-                
-                // Only include non-empty cells or cells with styles
-                if !value.is_empty() || style.is_some() {
-                    cells_data.push(((rel_row, rel_col), value, style));
-                }
+        let height = end.0 - origin.0 + 1;
+        let width = end.1 - origin.1 + 1;
+        ClipboardData {
+            cells: self
+                .clipboard_contents(origin, height, width)
+                .map(|(offset, value, style)| (offset, value.to_owned(), style))
+                .collect(),
+            origin,
+            height,
+            width,
+            export: ClipboardExport::Local,
+            action: if is_cut {
+                ClipboardAction::Cut
+            } else {
+                ClipboardAction::Copy
+            },
+        }
+    }
+
+    fn clipboard_contents(
+        &self,
+        (start_row, start_col): (usize, usize),
+        height: usize,
+        width: usize,
+    ) -> impl Iterator<Item = ((usize, usize), &str, Option<CellStyle>)> {
+        (0..height).flat_map(move |row| {
+            (0..width).filter_map(move |col| {
+                let position = (start_row + row, start_col + col);
+                let value = self.get_cell(position.0, position.1);
+                let style = self.cell_styles.get(&position).copied();
+                (!value.is_empty() || style.is_some()).then_some(((row, col), value, style))
+            })
+        })
+    }
+
+    fn invalidate_cut(&mut self) {
+        if let Some(snapshot) = &mut self.clipboard_data {
+            if snapshot.action == ClipboardAction::Cut {
+                snapshot.action = ClipboardAction::StaleCut;
             }
         }
-
-        // Build tab-separated text for system clipboard
-        let mut clipboard_text = String::new();
-        for row in min_row..=max_row {
-            let mut row_values = Vec::new();
-            for col in min_col..=max_col {
-                row_values.push(self.get_cell(row, col).to_string());
-            }
-            if row > min_row {
-                clipboard_text.push('\n');
-            }
-            clipboard_text.push_str(&row_values.join("\t"));
-        }
-
-        // Try to set system clipboard
-        if let Ok(mut clipboard) = arboard::Clipboard::new() {
-            let _ = clipboard.set_text(&clipboard_text);
-        }
-
-        // Store internal clipboard data
-        self.clipboard_data = Some(ClipboardData {
-            cells: cells_data,
-            is_cut,
-            cut_origin: if is_cut { Some((min_row, min_col)) } else { None },
-        });
     }
 
     /// Paste from clipboard at current cursor position
-    pub fn paste(&mut self) {
-        // First, try to use internal clipboard data if available
-        if let Some(clipboard_data) = self.clipboard_data.take() {
-            self.paste_internal(clipboard_data);
-            return;
-        }
-
-        // Fall back to system clipboard
-        if let Ok(mut clipboard) = arboard::Clipboard::new() {
-            if let Ok(text) = clipboard.get_text() {
-                self.paste_text(&text);
+    pub fn paste(&mut self, clipboard: &mut impl ClipboardBackend) {
+        self.clipboard_message = None;
+        let snapshot = self.clipboard_data.take();
+        let entry = clipboard.read_stable();
+        match entry {
+            ClipboardRead::Text(entry, generation) => {
+                if let Some(snapshot) =
+                    snapshot.filter(|data| data.matches_export(&entry, generation))
+                {
+                    let can_move = snapshot.owns_publication(generation);
+                    self.paste_snapshot(snapshot, can_move);
+                } else {
+                    self.paste_text(&entry.text);
+                }
+            }
+            ClipboardRead::NoText => {}
+            ClipboardRead::Changed => {
+                self.clipboard_data = snapshot.map(|mut snapshot| {
+                    snapshot.action = ClipboardAction::Copy;
+                    snapshot
+                });
+                self.clipboard_message = Some("  Clipboard changed. Paste again.");
+            }
+            ClipboardRead::Offline | ClipboardRead::Unavailable => {
+                if let Some(snapshot) = snapshot {
+                    let can_move = matches!(entry, ClipboardRead::Offline)
+                        && matches!(snapshot.export, ClipboardExport::Local);
+                    self.paste_snapshot(snapshot, can_move);
+                }
             }
         }
     }
 
-    fn paste_internal(&mut self, clipboard_data: ClipboardData) {
+    fn paste_snapshot(&mut self, mut snapshot: ClipboardData, can_move: bool) {
+        if snapshot.action == ClipboardAction::Cut && !can_move {
+            snapshot.action = ClipboardAction::StaleCut;
+        }
+        self.paste_internal(snapshot);
+    }
+
+    fn paste_internal(&mut self, mut snapshot: ClipboardData) {
         let dest_row = self.cursor_row;
         let dest_col = self.cursor_col;
 
-        // If this was a cut operation, clear the original cells first
-        if clipboard_data.is_cut {
-            if let Some((orig_row, orig_col)) = clipboard_data.cut_origin {
-                for ((rel_row, rel_col), _, _) in &clipboard_data.cells {
-                    let src_row = orig_row + rel_row;
-                    let src_col = orig_col + rel_col;
-                    self.cells.remove(&(src_row, src_col));
-                    self.cell_styles.remove(&(src_row, src_col));
-                }
+        let captured = snapshot
+            .cells
+            .iter()
+            .map(|(offset, value, style)| (*offset, value.as_str(), *style));
+        let source_changed = snapshot.action == ClipboardAction::Cut
+            && !self
+                .clipboard_contents(snapshot.origin, snapshot.height, snapshot.width)
+                .eq(captured);
+        if snapshot.action == ClipboardAction::StaleCut || source_changed {
+            snapshot.action = ClipboardAction::Copy;
+            self.clipboard_data = Some(snapshot);
+            self.clipboard_message = Some("  Cut canceled. Paste again to copy.");
+            return;
+        }
+
+        if snapshot.action == ClipboardAction::Cut {
+            let (source_row, source_col) = snapshot.origin;
+            for &((row, col), _, _) in &snapshot.cells {
+                let position = (source_row + row, source_col + col);
+                self.cells.remove(&position);
+                self.cell_styles.remove(&position);
             }
         }
 
-        // Paste cells at new position
-        for ((rel_row, rel_col), value, style) in &clipboard_data.cells {
-            let new_row = dest_row + rel_row;
-            let new_col = dest_col + rel_col;
-
-            // Expand grid if needed
-            if new_row >= self.num_rows {
-                self.num_rows = new_row + 1;
+        let end_row = dest_row + snapshot.height;
+        let end_col = dest_col + snapshot.width;
+        self.num_rows = self.num_rows.max(end_row);
+        self.num_cols = self.num_cols.max(end_col);
+        for row in dest_row..end_row {
+            for col in dest_col..end_col {
+                self.cells.remove(&(row, col));
+                self.cell_styles.remove(&(row, col));
             }
-            if new_col >= self.num_cols {
-                self.num_cols = new_col + 1;
-            }
+        }
 
-            // Set cell value
+        for ((rel_row, rel_col), value, style) in &snapshot.cells {
+            let position = (dest_row + rel_row, dest_col + rel_col);
             if !value.is_empty() {
-                self.cells.insert((new_row, new_col), value.clone());
+                self.cells.insert(position, value.clone());
             }
-
-            // Set cell style
             if let Some(s) = style {
-                self.cell_styles.insert((new_row, new_col), *s);
+                self.cell_styles.insert(position, *s);
             }
         }
 
-        // Re-store clipboard data for multiple pastes (but mark as copy, not cut)
-        self.clipboard_data = Some(ClipboardData {
-            cells: clipboard_data.cells,
-            is_cut: false,
-            cut_origin: None,
-        });
-
+        snapshot.action = ClipboardAction::Copy;
+        self.clipboard_data = Some(snapshot);
         self.clear_selection();
     }
 
@@ -401,26 +526,11 @@ impl Spreadsheet {
 
         for (row_offset, line) in text.lines().enumerate() {
             let new_row = dest_row + row_offset;
-            
-            // Expand rows if needed
-            if new_row >= self.num_rows {
-                self.num_rows = new_row + 1;
-            }
-
-            // Split by tabs (Excel/spreadsheet format)
-            let values: Vec<&str> = line.split('\t').collect();
-            
-            for (col_offset, value) in values.iter().enumerate() {
+            self.num_rows = self.num_rows.max(new_row + 1);
+            for (col_offset, value) in line.split('\t').enumerate() {
                 let new_col = dest_col + col_offset;
-                
-                // Expand columns if needed
-                if new_col >= self.num_cols {
-                    self.num_cols = new_col + 1;
-                }
-
-                if !value.is_empty() {
-                    self.cells.insert((new_row, new_col), value.to_string());
-                }
+                self.num_cols = self.num_cols.max(new_col + 1);
+                self.set_cell(new_row, new_col, value.to_owned());
             }
         }
 
@@ -572,7 +682,7 @@ impl Spreadsheet {
 
     /// Returns selection stats: (row_count, cell_count, numeric_count, sum) for the current selection
     /// Returns None if no multi-cell selection exists
-    pub fn get_selection_stats(&mut self) -> Option<(usize, usize, usize, f64)> {
+    pub fn get_selection_stats(&self) -> Option<SelectionStats> {
         // Get the effective selection range - could be from selection_anchor, selected_rows, or selected_cols
         let range = if let Some(((min_row, min_col), (max_row, max_col))) = self.get_selection_range() {
             // Regular cell selection
@@ -592,28 +702,58 @@ impl Spreadsheet {
 
         let (min_row, min_col, max_row, max_col) = range?;
 
+        let mut row_count = 0;
+        let mut last_row = None;
         let mut cell_count = 0usize;
         let mut numeric_count = 0usize;
         let mut sum = 0.0f64;
-        let mut rows_with_data = std::collections::HashSet::new();
+        let mut formulas = FormulaEvaluator::new(self);
 
-        for row in min_row..=max_row {
-            for col in min_col..=max_col {
-                let content = self.get_cell(row, col);
-                if !content.is_empty() {
-                    cell_count += 1;
-                    rows_with_data.insert(row);
-                    // Evaluate the cell to get the actual value (handles formulas)
-                    let evaluated = self.evaluate_cell(row, col);
-                    if let Ok(val) = evaluated.parse::<f64>() {
-                        numeric_count += 1;
-                        sum += val;
+        let mut add_cell = |row, col| {
+            if last_row != Some(row) {
+                last_row = Some(row);
+                row_count += 1;
+            }
+            cell_count += 1;
+            let evaluated = formulas.evaluate(row, col);
+            if let Ok(val) = evaluated.parse::<f64>() {
+                numeric_count += 1;
+                sum += val;
+            }
+        };
+
+        let rows = min_row..=max_row;
+        let cols = min_col..=max_col;
+        let height = (max_row - min_row).saturating_add(1);
+        let width = (max_col - min_col).saturating_add(1);
+        let area = height.saturating_mul(width);
+        if area <= self.cells.len() {
+            for row in rows {
+                for col in cols.clone() {
+                    #[cfg(test)]
+                    sparse_ui_probe::record(Work::SelectionCandidate);
+                    if !self.get_cell(row, col).is_empty() {
+                        add_cell(row, col);
                     }
                 }
             }
+        } else {
+            let mut positions: Vec<_> = self
+                .cells
+                .iter()
+                .filter_map(|(&(row, col), value)| {
+                    #[cfg(test)]
+                    sparse_ui_probe::record(Work::SelectionCandidate);
+                    (rows.contains(&row) && cols.contains(&col) && !value.is_empty())
+                        .then_some((row, col))
+                })
+                .collect();
+            // Preserve row-major floating-point addition order.
+            positions.sort_unstable();
+            for (row, col) in positions {
+                add_cell(row, col);
+            }
         }
-
-        let row_count = rows_with_data.len();
 
         if cell_count > 0 {
             Some((row_count, cell_count, numeric_count, sum))
@@ -930,10 +1070,18 @@ impl Spreadsheet {
 
     pub fn delete_selected_rows(&mut self) {
         if let Some((min_row, max_row)) = self.selected_rows {
+            self.invalidate_cut();
             // Delete rows from bottom to top to avoid index shifting issues
             for row in (min_row..=max_row).rev() {
                 self.delete_row(row);
             }
+            self.rewrite_formulas(
+                Axis::Row,
+                Edit::Delete {
+                    first: min_row,
+                    last: max_row,
+                },
+            );
             // Adjust cursor position
             if self.cursor_row >= min_row {
                 if self.cursor_row <= max_row {
@@ -948,10 +1096,18 @@ impl Spreadsheet {
 
     pub fn delete_selected_columns(&mut self) {
         if let Some((min_col, max_col)) = self.selected_cols {
+            self.invalidate_cut();
             // Delete columns from right to left to avoid index shifting issues
             for col in (min_col..=max_col).rev() {
                 self.delete_column(col);
             }
+            self.rewrite_formulas(
+                Axis::Column,
+                Edit::Delete {
+                    first: min_col,
+                    last: max_col,
+                },
+            );
             // Adjust cursor position
             if self.cursor_col >= min_col {
                 if self.cursor_col <= max_col {
@@ -966,12 +1122,20 @@ impl Spreadsheet {
 
     pub fn insert_rows_after_selected(&mut self) {
         if let Some((min_row, max_row)) = self.selected_rows {
+            self.invalidate_cut();
             let count = max_row - min_row + 1;
             // Insert after the last selected row
             let insert_after = max_row;
             for _ in 0..count {
                 self.insert_row_after(insert_after);
             }
+            self.rewrite_formulas(
+                Axis::Row,
+                Edit::Insert {
+                    at: insert_after + 1,
+                    count,
+                },
+            );
             // Move cursor to the first newly inserted row
             self.cursor_row = insert_after + 1;
             self.selected_rows = Some((insert_after + 1, insert_after + count));
@@ -980,15 +1144,31 @@ impl Spreadsheet {
 
     pub fn insert_columns_after_selected(&mut self) {
         if let Some((min_col, max_col)) = self.selected_cols {
+            self.invalidate_cut();
             let count = max_col - min_col + 1;
             // Insert after the last selected column
             let insert_after = max_col;
             for _ in 0..count {
                 self.insert_column_after(insert_after);
             }
+            self.rewrite_formulas(
+                Axis::Column,
+                Edit::Insert {
+                    at: insert_after + 1,
+                    count,
+                },
+            );
             // Move cursor to the first newly inserted column
             self.cursor_col = insert_after + 1;
             self.selected_cols = Some((insert_after + 1, insert_after + count));
+        }
+    }
+
+    fn rewrite_formulas(&mut self, axis: Axis, edit: Edit) {
+        for value in self.cells.values_mut() {
+            if let Some(updated) = formula_ref::rewrite(value, axis, edit) {
+                *value = updated;
+            }
         }
     }
 
@@ -1147,48 +1327,53 @@ impl Spreadsheet {
             .unwrap_or("")
             .to_lowercase();
 
+        let mut loaded = Self::new();
         match extension.as_str() {
-            "csv" => self.load_csv(filepath),
-            "tsv" => self.load_tsv(filepath),
-            "xlsx" | "xls" => self.load_excel(filepath),
-            _ => Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("Unsupported file format: {}", extension),
-            )),
+            "csv" => loaded.load_delimited(std::fs::File::open(path)?, b',')?,
+            "tsv" => loaded.load_delimited(std::fs::File::open(path)?, b'\t')?,
+            "xlsx" | "xls" => loaded.load_excel(filepath)?,
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Unsupported file format: {}", extension),
+                ));
+            }
         }
+        self.replace_document(loaded);
+        Ok(())
     }
 
-    fn load_csv(&mut self, filepath: &str) -> std::io::Result<()> {
-        self.load_delimited(filepath, b',')
+    fn replace_document(&mut self, mut loaded: Self) {
+        let (max_row, max_col) = loaded.get_data_bounds();
+        loaded.num_rows = (max_row + 1).max(DEFAULT_ROWS);
+        loaded.num_cols = (max_col + 1).max(DEFAULT_COLS);
+
+        loaded.dark_mode = self.dark_mode;
+        loaded.hide_update_prompt = self.hide_update_prompt;
+        loaded.update_available = self.update_available.take();
+        loaded.update_prompt_shown = self.update_prompt_shown;
+        loaded.update_in_progress = self.update_in_progress;
+        loaded.update_message = self.update_message.take();
+        *self = loaded;
     }
 
-    fn load_tsv(&mut self, filepath: &str) -> std::io::Result<()> {
-        self.load_delimited(filepath, b'\t')
-    }
-
-    fn load_delimited(&mut self, filepath: &str, delimiter: u8) -> std::io::Result<()> {
-        let mut reader = csv::ReaderBuilder::new()
+    fn delimited_reader<R: Read>(source: R, delimiter: u8) -> csv::Reader<R> {
+        csv::ReaderBuilder::new()
             .delimiter(delimiter)
             .has_headers(false)
-            .from_path(filepath)?;
+            .from_reader(source)
+    }
 
-        self.cells.clear();
-        let mut row_idx = 0;
-
-        for result in reader.records() {
+    fn load_delimited(&mut self, source: impl Read, delimiter: u8) -> io::Result<()> {
+        let mut reader = Self::delimited_reader(source, delimiter);
+        for (row_idx, result) in reader.records().enumerate() {
             let record = result?;
             for (col_idx, field) in record.iter().enumerate() {
                 if !field.is_empty() {
                     self.set_cell(row_idx, col_idx, field.to_string());
                 }
             }
-            row_idx += 1;
         }
-
-        // Update dimensions based on loaded data
-        let (max_row, max_col) = self.get_data_bounds();
-        self.num_rows = (max_row + 1).max(DEFAULT_ROWS);
-        self.num_cols = (max_col + 1).max(DEFAULT_COLS);
 
         Ok(())
     }
@@ -1215,8 +1400,9 @@ impl Spreadsheet {
         let range = workbook
             .worksheet_range(&sheet_names[0])
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-
-        self.cells.clear();
+        let Some((start_row, start_col)) = range.start() else {
+            return Ok(());
+        };
 
         for (row_idx, row) in range.rows().enumerate() {
             for (col_idx, cell) in row.iter().enumerate() {
@@ -1243,54 +1429,63 @@ impl Spreadsheet {
                 };
 
                 if !value.is_empty() {
-                    self.set_cell(row_idx, col_idx, value);
+                    self.set_cell(
+                        start_row as usize + row_idx,
+                        start_col as usize + col_idx,
+                        value,
+                    );
                 }
             }
         }
-
-        // Update dimensions based on loaded data
-        let (max_row, max_col) = self.get_data_bounds();
-        self.num_rows = (max_row + 1).max(DEFAULT_ROWS);
-        self.num_cols = (max_col + 1).max(DEFAULT_COLS);
 
         Ok(())
     }
 
-    /// Load spreadsheet data from a byte buffer (e.g., from piped stdin)
-    pub fn load_from_buffer(&mut self, buffer: &[u8]) -> std::io::Result<()> {
-        // Convert to string for processing
-        let buffer_str = String::from_utf8_lossy(buffer);
-        
-        self.cells.clear();
-        let mut row_idx = 0;
-        
-        // Process the buffered data line by line
-        for line in buffer_str.lines() {
-            let trimmed = line.trim();
-            
-            // Skip empty lines
-            if trimmed.is_empty() {
-                continue;
-            }
-            
-            // Split by whitespace (handles multiple spaces/tabs)
-            let parts: Vec<&str> = trimmed.split_whitespace().collect();
-            
-            for (col_idx, part) in parts.iter().enumerate() {
-                if !part.is_empty() {
-                    self.set_cell(row_idx, col_idx, part.to_string());
+    pub fn load_from_buffer(&mut self, buffer: &[u8], format: StdinFormat) -> io::Result<()> {
+        let delimiter = match format {
+            // Prefer TSV when both delimiters yield consistent records.
+            StdinFormat::Auto => [b'\t', b',']
+                .into_iter()
+                .find(|&delimiter| Self::looks_delimited(buffer, delimiter)),
+            StdinFormat::Csv => Some(b','),
+            StdinFormat::Tsv => Some(b'\t'),
+            StdinFormat::Whitespace => None,
+        };
+
+        let mut loaded = Self::new();
+        if let Some(delimiter) = delimiter {
+            loaded.load_delimited(buffer, delimiter)?;
+        } else {
+            let text = String::from_utf8_lossy(buffer);
+            for (row, line) in text
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .enumerate()
+            {
+                for (col, value) in line.split_whitespace().enumerate() {
+                    loaded.set_cell(row, col, value.to_owned());
                 }
             }
-            
-            row_idx += 1;
         }
-        
-        // Update dimensions based on loaded data
-        let (max_row, max_col) = self.get_data_bounds();
-        self.num_rows = (max_row + 1).max(DEFAULT_ROWS);
-        self.num_cols = (max_col + 1).max(DEFAULT_COLS);
-        
+        self.replace_document(loaded);
         Ok(())
+    }
+
+    fn looks_delimited(buffer: &[u8], delimiter: u8) -> bool {
+        let mut reader = Self::delimited_reader(buffer, delimiter);
+        let mut record = csv::ByteRecord::new();
+        if !matches!(reader.read_byte_record(&mut record), Ok(true)) || record.len() < 2 {
+            return false;
+        }
+
+        // The reader rejects records whose field counts differ from the first.
+        loop {
+            match reader.read_byte_record(&mut record) {
+                Ok(true) => continue,
+                Ok(false) => return true,
+                Err(_) => return false,
+            }
+        }
     }
 }
 
@@ -1303,6 +1498,100 @@ impl Default for Spreadsheet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sparse_ui_probe::count_work;
+
+    #[test]
+    fn sparse_find_preserves_sorted_matches_and_the_first_match_cursor() {
+        let mut sheet = Spreadsheet::new();
+        sheet.num_rows = 1000;
+        sheet.num_cols = 1000;
+        for (row, col, value) in [
+            (999, 0, "Écho"),
+            (0, 5, "ÉCHO"),
+            (0, 2, "Écho"),
+            (1000, 0, "Écho"),
+            (4, 2, "other"),
+        ] {
+            sheet.set_cell(row, col, value.into());
+        }
+        sheet.enter_find_mode();
+        sheet.find_query = "écho".into();
+        let ((), work) = count_work(|| sheet.update_find_matches());
+        assert_eq!(work.find_candidates, 5);
+        assert_eq!(sheet.find_matches, [(0, 2), (0, 5), (999, 0)]);
+        assert_eq!((sheet.cursor_row, sheet.cursor_col), (0, 2));
+        assert!(sheet.is_find_match(999, 0));
+        assert!(!sheet.is_find_match(1000, 0));
+
+        sheet.find_query.clear();
+        let ((), work) = count_work(|| sheet.update_find_matches());
+        assert_eq!(work.find_candidates, 0);
+        assert!(sheet.find_matches.is_empty());
+        assert_eq!((sheet.cursor_row, sheet.cursor_col), (0, 2));
+    }
+
+    #[test]
+    fn find_highlights_use_logarithmic_membership_with_many_matches() {
+        let mut sheet = Spreadsheet::new();
+        sheet.num_cols = 100;
+        for row in (0..100).rev() {
+            for col in (0..100).rev() {
+                sheet.set_cell(row, col, "match".into());
+            }
+        }
+        sheet.enter_find_mode();
+        sheet.find_query = "match".into();
+        sheet.update_find_matches();
+        assert_eq!(sheet.find_matches.len(), 10_000);
+        assert_eq!(sheet.find_matches.first(), Some(&(0, 0)));
+        assert_eq!(sheet.find_matches.last(), Some(&(99, 99)));
+        let (matches, work) = count_work(|| (sheet.is_find_match(99, 99), sheet.is_find_match(100, 1)));
+        assert_eq!(matches, (true, false));
+        assert!(work.highlight_comparisons <= 30);
+
+        sheet.exit_find_mode();
+        let (matched, work) = count_work(|| sheet.is_find_match(99, 99));
+        assert!(!matched);
+        assert_eq!(work.highlight_comparisons, 0);
+    }
+
+    #[test]
+    fn selection_stats_preserve_row_major_sum_and_refresh_after_edits() {
+        let mut sheet = Spreadsheet::new();
+        sheet.num_rows = 1000;
+        sheet.num_cols = 1000;
+        for (row, col, value) in [
+            (1, 0, "-10000000000000000"),
+            (0, 3, "1"),
+            (1, 1, "=ABS(C2)"),
+            (0, 0, "10000000000000000"),
+            (1, 2, "7"),
+            (1000, 0, "outside"),
+        ] {
+            sheet.set_cell(row, col, value.into());
+        }
+        sheet.selection_anchor = Some((0, 0));
+        sheet.cursor_row = 999;
+        sheet.cursor_col = 999;
+        let (stats, work) = count_work(|| sheet.get_selection_stats());
+        assert_eq!(stats, Some((2, 5, 5, 14.0)));
+        assert_eq!(work.selection_candidates, 6);
+
+        sheet.set_cell(1, 2, "3".into());
+        assert_eq!(sheet.get_selection_stats(), Some((2, 5, 5, 6.0)));
+        sheet.selection_anchor = Some((1, 1));
+        sheet.cursor_row = 1;
+        sheet.cursor_col = 2;
+        let (stats, work) = count_work(|| sheet.get_selection_stats());
+        assert_eq!(stats, Some((1, 2, 2, 6.0)));
+        assert_eq!(work.selection_candidates, 2);
+
+        sheet.clear_selection();
+        assert_eq!(sheet.get_selection_stats(), None);
+        sheet.selected_cols = Some((1, 2));
+        assert_eq!(sheet.get_selection_stats(), Some((1, 2, 2, 6.0)));
+    }
+    use crate::clipboard::OfflineClipboard;
 
     #[test]
     fn test_col_name() {
@@ -1355,11 +1644,192 @@ mod tests {
     }
 
     #[test]
+    fn stale_cut_cancels_overlapping_paste_and_remains_available_as_copy() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "first".into());
+        sheet.set_cell(0, 1, "second".into());
+        sheet.set_cell(0, 2, "destination".into());
+        sheet.selection_anchor = Some((0, 0));
+        sheet.cursor_col = 1;
+        sheet.clipboard_data = Some(sheet.capture_clipboard(true));
+        sheet.set_cell(0, 1, "edited".into());
+
+        sheet.paste(&mut OfflineClipboard);
+
+        assert_eq!(sheet.get_cell(0, 0), "first");
+        assert_eq!(sheet.get_cell(0, 1), "edited");
+        assert_eq!(sheet.get_cell(0, 2), "destination");
+        assert!(sheet.clipboard_message.is_some());
+
+        sheet.cursor_col = 3;
+        sheet.paste(&mut OfflineClipboard);
+        assert_eq!(sheet.get_cell(0, 1), "edited");
+        assert_eq!(sheet.get_cell(0, 3), "first");
+        assert_eq!(sheet.get_cell(0, 4), "second");
+        assert!(sheet.clipboard_message.is_none());
+    }
+
+    #[test]
+    fn cut_detects_new_content_in_a_previously_blank_field() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "first".into());
+        sheet.selection_anchor = Some((0, 0));
+        sheet.cursor_col = 1;
+        sheet.clipboard_data = Some(sheet.capture_clipboard(true));
+        sheet.set_cell(0, 1, "new".into());
+        sheet.cursor_col = 2;
+
+        sheet.paste(&mut OfflineClipboard);
+
+        assert_eq!(sheet.get_cell(0, 0), "first");
+        assert_eq!(sheet.get_cell(0, 1), "new");
+        assert_eq!(sheet.get_cell(0, 2), "");
+        assert!(sheet.clipboard_message.is_some());
+    }
+
+    #[test]
+    fn cut_detects_a_style_change() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "same value".into());
+        sheet.clipboard_data = Some(sheet.capture_clipboard(true));
+        sheet.set_cell_bold(0, 0, true);
+        sheet.cursor_col = 1;
+
+        sheet.paste(&mut OfflineClipboard);
+
+        assert_eq!(sheet.get_cell(0, 0), "same value");
+        assert!(sheet.get_cell_style(0, 0).bold);
+        assert_eq!(sheet.get_cell(0, 1), "");
+        assert!(sheet.clipboard_message.is_some());
+    }
+
+    #[test]
+    fn row_deletion_invalidates_cut_even_if_old_coordinates_still_match() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(1, 0, "same value".into());
+        sheet.set_cell(2, 0, "same value".into());
+        sheet.cursor_row = 1;
+        sheet.clipboard_data = Some(sheet.capture_clipboard(true));
+
+        sheet.selected_rows = Some((0, 0));
+        sheet.delete_selected_rows();
+        sheet.cursor_col = 1;
+        sheet.paste(&mut OfflineClipboard);
+
+        assert_eq!(sheet.get_cell(0, 0), "same value");
+        assert_eq!(sheet.get_cell(1, 0), "same value");
+        assert_eq!(sheet.get_cell(0, 1), "");
+        assert!(sheet.clipboard_message.is_some());
+    }
+
+    #[test]
+    fn column_insertion_invalidates_cut_even_if_old_coordinates_still_match() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 1, "same value".into());
+        sheet.set_cell(0, 2, "same value".into());
+        sheet.cursor_col = 2;
+        sheet.clipboard_data = Some(sheet.capture_clipboard(true));
+
+        sheet.selected_cols = Some((0, 0));
+        sheet.insert_columns_after_selected();
+        sheet.cursor_col = 4;
+        sheet.paste(&mut OfflineClipboard);
+
+        assert_eq!(sheet.get_cell(0, 2), "same value");
+        assert_eq!(sheet.get_cell(0, 3), "same value");
+        assert_eq!(sheet.get_cell(0, 4), "");
+        assert!(sheet.clipboard_message.is_some());
+    }
+
+    #[test]
+    fn valid_overlapping_cut_moves_values_and_styles() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "first".into());
+        sheet.set_cell_bold(0, 0, true);
+        sheet.set_cell(0, 1, "second".into());
+        sheet.selection_anchor = Some((0, 0));
+        sheet.cursor_col = 1;
+        sheet.clipboard_data = Some(sheet.capture_clipboard(true));
+
+        sheet.paste(&mut OfflineClipboard);
+
+        assert_eq!(sheet.get_cell(0, 0), "");
+        assert!(!sheet.get_cell_style(0, 0).bold);
+        assert_eq!(sheet.get_cell(0, 1), "first");
+        assert!(sheet.get_cell_style(0, 1).bold);
+        assert_eq!(sheet.get_cell(0, 2), "second");
+        assert!(!sheet.get_cell_style(0, 2).bold);
+        assert!(sheet.clipboard_message.is_none());
+    }
+
+    #[test]
+    fn internal_paste_replaces_full_rectangle_and_keeps_source_styles() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "copied".into());
+        sheet.set_cell_bold(0, 1, true);
+        sheet.selection_anchor = Some((0, 0));
+        sheet.cursor_row = 1;
+        sheet.cursor_col = 2;
+        sheet.clipboard_data = Some(sheet.capture_clipboard(false));
+
+        for row in 3..=5 {
+            for col in 4..=7 {
+                sheet.set_cell(row, col, "previous".into());
+                sheet.set_cell_bold(row, col, true);
+            }
+        }
+        sheet.cursor_row = 3;
+        sheet.cursor_col = 4;
+        sheet.paste(&mut OfflineClipboard);
+
+        assert_eq!(sheet.get_cell(3, 4), "copied");
+        assert_eq!(sheet.get_cell(3, 5), "");
+        assert!(sheet.get_cell_style(3, 5).bold);
+        for (row, col) in [(3, 6), (4, 4), (4, 5), (4, 6)] {
+            assert_eq!(sheet.get_cell(row, col), "");
+            assert!(!sheet.get_cell_style(row, col).bold);
+        }
+        assert!(!sheet.get_cell_style(3, 4).bold);
+        assert_eq!(sheet.get_cell(5, 4), "previous");
+        assert_eq!(sheet.get_cell(3, 7), "previous");
+
+        sheet.cursor_row = DEFAULT_ROWS - 1;
+        sheet.cursor_col = DEFAULT_COLS - 1;
+        sheet.paste(&mut OfflineClipboard);
+        assert_eq!(sheet.get_cell(DEFAULT_ROWS - 1, DEFAULT_COLS - 1), "copied");
+        assert_eq!(sheet.num_rows, DEFAULT_ROWS + 1);
+        assert_eq!(sheet.num_cols, DEFAULT_COLS + 2);
+    }
+
+    #[test]
+    fn external_paste_clears_explicit_empty_fields_and_preserves_formatting() {
+        let mut sheet = Spreadsheet::new();
+        for row in 0..3 {
+            for col in 0..5 {
+                sheet.set_cell(row, col, "previous".into());
+                sheet.set_cell_bold(row, col, true);
+            }
+        }
+
+        sheet.paste_text("left\t\tright\t\r\nnext\r\n\r\n");
+
+        assert_eq!(sheet.get_cell(0, 0), "left");
+        assert_eq!(sheet.get_cell(0, 2), "right");
+        for (row, col) in [(0, 1), (0, 3), (2, 0)] {
+            assert_eq!(sheet.get_cell(row, col), "");
+            assert!(sheet.get_cell_style(row, col).bold);
+        }
+        assert_eq!(sheet.get_cell(0, 4), "previous");
+        assert_eq!(sheet.get_cell(1, 0), "next");
+        assert_eq!(sheet.get_cell(1, 1), "previous");
+    }
+
+    #[test]
     fn test_load_from_buffer_simple() {
         let mut sheet = Spreadsheet::new();
         let data = b"hello world\nfoo bar baz";
         
-        sheet.load_from_buffer(data).unwrap();
+        sheet.load_from_buffer(data, StdinFormat::Auto).unwrap();
         
         assert_eq!(sheet.get_cell(0, 0), "hello");
         assert_eq!(sheet.get_cell(0, 1), "world");
@@ -1374,7 +1844,7 @@ mod tests {
         // Multiple spaces and tabs between fields
         let data = b"col1    col2\tcol3\n  value1   value2  ";
         
-        sheet.load_from_buffer(data).unwrap();
+        sheet.load_from_buffer(data, StdinFormat::Auto).unwrap();
         
         assert_eq!(sheet.get_cell(0, 0), "col1");
         assert_eq!(sheet.get_cell(0, 1), "col2");
@@ -1388,7 +1858,7 @@ mod tests {
         let mut sheet = Spreadsheet::new();
         let data = b"line1\n\n\nline2\n   \nline3";
         
-        sheet.load_from_buffer(data).unwrap();
+        sheet.load_from_buffer(data, StdinFormat::Auto).unwrap();
         
         assert_eq!(sheet.get_cell(0, 0), "line1");
         assert_eq!(sheet.get_cell(1, 0), "line2");
@@ -1403,7 +1873,7 @@ mod tests {
 drwxr-xr-x  3 user group  96 Jan 23 14:20 .git
 -rw-r--r--  1 user group 500 Jan 23 14:20 Cargo.toml";
         
-        sheet.load_from_buffer(data).unwrap();
+        sheet.load_from_buffer(data, StdinFormat::Auto).unwrap();
         
         // First line: "total 120"
         assert_eq!(sheet.get_cell(0, 0), "total");
@@ -1423,7 +1893,7 @@ drwxr-xr-x  3 user group  96 Jan 23 14:20 .git
         let mut sheet = Spreadsheet::new();
         let data = b"";
         
-        sheet.load_from_buffer(data).unwrap();
+        sheet.load_from_buffer(data, StdinFormat::Auto).unwrap();
         
         // Should have default dimensions but no data
         assert!(sheet.num_rows >= DEFAULT_ROWS);
@@ -1436,11 +1906,77 @@ drwxr-xr-x  3 user group  96 Jan 23 14:20 .git
         let mut sheet = Spreadsheet::new();
         let data = "héllo wörld\n日本語 テスト".as_bytes();
         
-        sheet.load_from_buffer(data).unwrap();
+        sheet.load_from_buffer(data, StdinFormat::Auto).unwrap();
         
         assert_eq!(sheet.get_cell(0, 0), "héllo");
         assert_eq!(sheet.get_cell(0, 1), "wörld");
         assert_eq!(sheet.get_cell(1, 0), "日本語");
         assert_eq!(sheet.get_cell(1, 1), "テスト");
+    }
+
+    #[test]
+    fn auto_prefers_tsv_when_both_delimiters_fit() {
+        let mut sheet = Spreadsheet::new();
+        sheet
+            .load_from_buffer(b"a,b\tc,d\nx,y\tz,w\n", StdinFormat::Auto)
+            .unwrap();
+        assert_eq!(sheet.get_cell(0, 0), "a,b");
+        assert_eq!(sheet.get_cell(0, 1), "c,d");
+        assert_eq!(sheet.get_cell(1, 0), "x,y");
+        assert_eq!(sheet.get_cell(1, 1), "z,w");
+    }
+
+    #[test]
+    fn whitespace_can_be_selected_when_delimiters_look_consistent() {
+        let mut sheet = Spreadsheet::new();
+        sheet
+            .load_from_buffer(b"first,last extra\n", StdinFormat::Whitespace)
+            .unwrap();
+        assert_eq!(sheet.get_cell(0, 0), "first,last");
+        assert_eq!(sheet.get_cell(0, 1), "extra");
+    }
+
+    #[test]
+    fn excel_open_keeps_lone_value_at_c5() {
+        let mut sheet = Spreadsheet::new();
+        sheet
+            .load_from_file(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/only-c5.xlsx"
+            ))
+            .unwrap();
+
+        assert_eq!(sheet.get_cell(4, 2), "42");
+        assert_eq!(sheet.get_cell(0, 0), "");
+        assert_eq!(sheet.cells.len(), 1);
+    }
+
+    #[test]
+    fn excel_open_expands_grid_for_offset_value() {
+        let mut sheet = Spreadsheet::new();
+        sheet
+            .load_from_file(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/only-ab105.xlsx"
+            ))
+            .unwrap();
+
+        assert_eq!(sheet.get_cell(104, 27), "7");
+        assert_eq!((sheet.num_rows, sheet.num_cols), (105, 28));
+    }
+
+    #[test]
+    fn excel_open_replaces_current_sheet_with_empty_worksheet() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "before Open".into());
+        sheet
+            .load_from_file(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/empty-sheet.xlsx"
+            ))
+            .unwrap();
+
+        assert!(sheet.cells.is_empty());
+        assert_eq!((sheet.num_rows, sheet.num_cols), (DEFAULT_ROWS, DEFAULT_COLS));
     }
 }

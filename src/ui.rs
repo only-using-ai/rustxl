@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -13,7 +15,11 @@ use crate::constants::{
     DARK_GRID_COLOR, DARK_HEADER_BG, DARK_HEADER_FG, DARK_REF_RANGE_BG, DARK_REF_SELECTION_BG,
     DARK_SELECTED_BG, DARK_SELECTED_HEADER_BG, DARK_FIND_MATCH_BG,
 };
-use crate::spreadsheet::Spreadsheet;
+use crate::{
+    formula::FormulaEvaluator,
+    shell::ShellStep,
+    spreadsheet::{SelectionStats, Spreadsheet},
+};
 use crate::types::{DataType, RowColumnSelectMode, SaveFormat, TextAlignment, VerticalAlignment, VisualSubMode};
 
 fn format_cell_by_type(value: &str, data_type: DataType) -> String {
@@ -67,8 +73,14 @@ fn format_cell_by_type(value: &str, data_type: DataType) -> String {
 pub fn render(f: &mut Frame, spreadsheet: &mut Spreadsheet) {
     let area = f.area();
 
-    // Check if we have selection stats to show
-    let has_stats = spreadsheet.get_selection_stats().is_some();
+    if let Some(prompt) = &mut spreadsheet.shell_prompt {
+        prompt.can_confirm = false;
+        render_shell_prompt(f, spreadsheet, area);
+        return;
+    }
+
+    let stats = spreadsheet.get_selection_stats();
+    let has_stats = stats.is_some();
     // Check if we need to show update prompt or message
     let has_update = spreadsheet.update_prompt_shown || spreadsheet.update_message.is_some();
     // Check if we need to show autocomplete suggestions
@@ -130,8 +142,8 @@ pub fn render(f: &mut Frame, spreadsheet: &mut Spreadsheet) {
         render_autocomplete(f, spreadsheet, autocomplete_area);
     }
     render_grid(f, spreadsheet, grid_area, visible_cols, visible_rows);
-    if let Some(stats_area) = stats_area {
-        render_stats_bar(f, spreadsheet, stats_area);
+    if let (Some(stats), Some(stats_area)) = (stats, stats_area) {
+        render_stats_bar(f, stats, stats_area);
     }
     render_status_bar(f, spreadsheet, status_area);
     
@@ -139,6 +151,101 @@ pub fn render(f: &mut Frame, spreadsheet: &mut Spreadsheet) {
     if has_update {
         render_update_bar(f, spreadsheet, area);
     }
+}
+
+fn render_shell_prompt(f: &mut Frame, spreadsheet: &mut Spreadsheet, area: Rect) {
+    let Some(prompt) = &spreadsheet.shell_prompt else {
+        return;
+    };
+    let (title, text, controls) = match &prompt.step {
+        ShellStep::Run { row, col, command } => (
+            format!("Run SHELL in {}{}", Spreadsheet::col_name(*col), row + 1),
+            Cow::Borrowed(command.as_str()),
+            "r Run   ↑/↓ Scroll   Esc Cancel",
+        ),
+        ShellStep::Apply(output) => {
+            let range = output.range();
+            let (writes, occupied) = output.counts(spreadsheet);
+            (
+                "Apply SHELL output".to_string(),
+                Cow::Owned(format!(
+                    "Destination range {range}\nCells to write {writes}\nOccupied cells to overwrite {occupied}"
+                )),
+                "a Apply   Esc Cancel",
+            )
+        }
+        ShellStep::Message(message) => (
+            "SHELL result".to_string(),
+            Cow::Borrowed(message.as_str()),
+            "↑/↓ Scroll   Esc Close",
+        ),
+    };
+    let title_width = Span::raw(title.as_str()).width();
+    let block = Block::default().borders(Borders::ALL).title(title);
+    let inner = block.inner(area);
+    let footer = shell_preview_lines(controls, inner.width.into());
+    let height = usize::from(inner.height).saturating_sub(footer.len());
+    let lines = if height > 0 && usize::from(inner.width) >= title_width {
+        shell_preview_lines(&text, inner.width.into())
+    } else {
+        Vec::new()
+    };
+    if lines.is_empty() || (matches!(prompt.step, ShellStep::Apply(_)) && lines.len() > height) {
+        f.render_widget(
+            Paragraph::new("Resize to review SHELL. Esc closes.").wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
+
+    f.render_widget(block, area);
+    let [body_area, footer_area] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(footer.len() as u16)]).areas(inner);
+    let scroll = prompt.scroll.min(lines.len().saturating_sub(height));
+    let visible = lines
+        .into_iter()
+        .skip(scroll)
+        .take(height)
+        .map(Line::raw)
+        .collect::<Vec<_>>();
+    f.render_widget(Paragraph::new(visible), body_area);
+    f.render_widget(
+        Paragraph::new(footer.into_iter().map(Line::raw).collect::<Vec<_>>())
+            .style(Style::default().fg(Color::Yellow)),
+        footer_area,
+    );
+    if let Some(prompt) = &mut spreadsheet.shell_prompt {
+        prompt.scroll = scroll;
+        prompt.can_confirm = !matches!(prompt.step, ShellStep::Message(_));
+    }
+}
+
+fn shell_preview_lines(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    for line in text.split('\n') {
+        // Make terminal control characters inspectable, including tabs and CR.
+        let mut escaped = String::new();
+        for ch in line.chars() {
+            if ch.is_control() {
+                escaped.extend(ch.escape_default());
+            } else {
+                escaped.push(ch);
+            }
+        }
+        let mut current = String::new();
+        let mut used = 0;
+        for grapheme in Span::raw(escaped).styled_graphemes(Style::default()) {
+            let width_needed = Span::raw(grapheme.symbol).width();
+            if used > 0 && used + width_needed > width {
+                lines.push(std::mem::take(&mut current));
+                used = 0;
+            }
+            current.push_str(grapheme.symbol);
+            used += width_needed;
+        }
+        lines.push(current);
+    }
+    lines
 }
 
 fn render_formula_bar(f: &mut Frame, spreadsheet: &Spreadsheet, area: Rect) {
@@ -256,7 +363,7 @@ fn render_autocomplete(f: &mut Frame, spreadsheet: &Spreadsheet, area: Rect) {
 
 fn render_grid(
     f: &mut Frame,
-    spreadsheet: &mut Spreadsheet,
+    spreadsheet: &Spreadsheet,
     area: Rect,
     visible_cols: usize,
     visible_rows: usize,
@@ -302,6 +409,7 @@ fn render_grid(
     let header = Row::new(header_cells).height(1);
 
     let mut rows = Vec::new();
+    let mut formulas = FormulaEvaluator::new(spreadsheet);
     for row in spreadsheet.scroll_row..spreadsheet.scroll_row + visible_rows {
         if row >= spreadsheet.num_rows {
             break;
@@ -339,10 +447,7 @@ fn render_grid(
             }
 
             let is_cursor = row == spreadsheet.cursor_row && col == spreadsheet.cursor_col;
-            let evaluated = {
-                // Evaluate cell - this may modify the spreadsheet for SHELL formulas
-                spreadsheet.evaluate_cell(row, col)
-            };
+            let evaluated = formulas.evaluate(row, col);
 
             let cell_style = spreadsheet.get_cell_style(row, col);
             
@@ -560,42 +665,44 @@ fn render_grid(
     f.render_widget(table, area);
 }
 
-fn render_stats_bar(f: &mut Frame, spreadsheet: &mut Spreadsheet, area: Rect) {
-    if let Some((row_count, cell_count, numeric_count, sum)) = spreadsheet.get_selection_stats() {
-        let mut spans = vec![
-            Span::styled("  Rows: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{}", row_count), Style::default().fg(Color::White)),
-            Span::styled("  Cells: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{}", cell_count), Style::default().fg(Color::White)),
-        ];
+fn render_stats_bar(
+    f: &mut Frame,
+    (row_count, cell_count, numeric_count, sum): SelectionStats,
+    area: Rect,
+) {
+    let mut spans = vec![
+        Span::styled("  Rows: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{}", row_count), Style::default().fg(Color::White)),
+        Span::styled("  Cells: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{}", cell_count), Style::default().fg(Color::White)),
+    ];
 
-        if numeric_count > 0 {
-            spans.push(Span::styled("  Sum: ", Style::default().fg(Color::DarkGray)));
-            // Format sum nicely - remove trailing zeros for integers
-            let sum_str = if sum.fract() == 0.0 {
-                format!("{:.0}", sum)
-            } else {
-                format!("{}", sum)
-            };
-            spans.push(Span::styled(sum_str, Style::default().fg(Color::Cyan)));
-            
-            // Also show average
-            let avg = sum / numeric_count as f64;
-            spans.push(Span::styled("  Avg: ", Style::default().fg(Color::DarkGray)));
-            let avg_str = if avg.fract() == 0.0 {
-                format!("{:.0}", avg)
-            } else {
-                format!("{:.2}", avg)
-            };
-            spans.push(Span::styled(avg_str, Style::default().fg(Color::Cyan)));
-        }
+    if numeric_count > 0 {
+        spans.push(Span::styled("  Sum: ", Style::default().fg(Color::DarkGray)));
+        // Format sum nicely - remove trailing zeros for integers
+        let sum_str = if sum.fract() == 0.0 {
+            format!("{:.0}", sum)
+        } else {
+            format!("{}", sum)
+        };
+        spans.push(Span::styled(sum_str, Style::default().fg(Color::Cyan)));
 
-        let stats_line = Line::from(spans);
-        f.render_widget(
-            Paragraph::new(stats_line).style(Style::default().bg(Color::Rgb(35, 35, 35))),
-            area,
-        );
+        // Also show average
+        let avg = sum / numeric_count as f64;
+        spans.push(Span::styled("  Avg: ", Style::default().fg(Color::DarkGray)));
+        let avg_str = if avg.fract() == 0.0 {
+            format!("{:.0}", avg)
+        } else {
+            format!("{:.2}", avg)
+        };
+        spans.push(Span::styled(avg_str, Style::default().fg(Color::Cyan)));
     }
+
+    let stats_line = Line::from(spans);
+    f.render_widget(
+        Paragraph::new(stats_line).style(Style::default().bg(Color::Rgb(35, 35, 35))),
+        area,
+    );
 }
 
 fn render_status_bar(f: &mut Frame, spreadsheet: &Spreadsheet, area: Rect) {
@@ -651,7 +758,12 @@ fn render_status_bar(f: &mut Frame, spreadsheet: &Spreadsheet, area: Rect) {
         )
     };
 
-    let status = if spreadsheet.command_mode {
+    let status = if let Some(message) = spreadsheet.clipboard_message {
+        Line::from(vec![
+            Span::styled(mode, mode_style),
+            Span::styled(message, Style::default().fg(Color::Yellow)),
+        ])
+    } else if spreadsheet.command_mode {
         render_command_status(spreadsheet, mode, mode_style)
     } else if spreadsheet.open_mode {
         render_open_status(spreadsheet, mode, mode_style)
@@ -718,7 +830,7 @@ fn render_command_status<'a>(spreadsheet: &Spreadsheet, mode: &'a str, mode_styl
         Span::styled(" execute  ", Style::default().fg(Color::DarkGray)),
         Span::styled("Esc", Style::default().fg(Color::Yellow)),
         Span::styled(" cancel  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("(e.g. A1, B23, q)", Style::default().fg(Color::Cyan)),
+        Span::styled("(e.g. A1, run, q)", Style::default().fg(Color::Cyan)),
         if !msg.is_empty() {
             Span::styled(format!("  {}", msg), Style::default().fg(Color::Red))
         } else {
@@ -1036,15 +1148,16 @@ fn render_ready_status<'a>(mode: &'a str, mode_style: Style) -> Line<'a> {
 
 fn render_update_bar(f: &mut Frame, spreadsheet: &Spreadsheet, terminal_area: Rect) {
     let text = if spreadsheet.update_in_progress {
+        let progress = spreadsheet
+            .update_message
+            .as_deref()
+            .unwrap_or("Downloading update...");
         Text::from(Line::from(vec![
             Span::styled(
                 " UPDATE ",
                 Style::default().bg(Color::Rgb(0, 150, 136)).fg(Color::White),
             ),
-            Span::styled(
-                "  Downloading update...",
-                Style::default().fg(Color::Yellow),
-            ),
+            Span::styled(format!("  {progress}"), Style::default().fg(Color::Yellow)),
         ]))
     } else if let Some(ref msg) = spreadsheet.update_message {
         // Show update result message

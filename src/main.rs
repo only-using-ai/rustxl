@@ -1,8 +1,13 @@
+mod clipboard;
 mod constants;
 mod formula;
+mod formula_ref;
 mod input;
 mod save;
 mod settings;
+mod shell;
+#[cfg(test)]
+mod sparse_ui_probe;
 mod spreadsheet;
 mod style;
 mod types;
@@ -15,9 +20,11 @@ use clap::Parser;
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{Terminal, backend::CrosstermBackend};
+use spreadsheet::Spreadsheet;
+use types::StdinFormat;
 
 #[derive(Parser)]
 #[command(name = "xl")]
@@ -26,9 +33,37 @@ struct Args {
     /// File to open (supports CSV, TSV, and Excel files)
     #[arg(short, long)]
     file: Option<String>,
+    /// Format of piped input
+    #[arg(long, value_enum, default_value = "auto", conflicts_with = "file")]
+    stdin_format: StdinFormat,
     /// Print version information and exit
     #[arg(short = 'V', long = "version")]
     version: bool,
+}
+
+impl Args {
+    fn load_input(
+        &self,
+        sheet: &mut Spreadsheet,
+        read_stdin: impl FnOnce() -> io::Result<Option<Vec<u8>>>,
+    ) -> io::Result<()> {
+        if let Some(path) = &self.file {
+            return sheet.load_from_file(path).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("Error loading file '{path}': {error}"),
+                )
+            });
+        }
+        if let Some(data) = read_stdin()? {
+            sheet
+                .load_from_buffer(&data, self.stdin_format)
+                .map_err(|error| {
+                    io::Error::new(error.kind(), format!("Error loading stdin: {error}"))
+                })?;
+        }
+        Ok(())
+    }
 }
 
 /// Reads all data from stdin into a buffer when stdin is piped.
@@ -37,51 +72,67 @@ fn read_piped_stdin() -> io::Result<Option<Vec<u8>>> {
     if atty::is(atty::Stream::Stdin) {
         return Ok(None);
     }
-    
+
     let mut buffer = Vec::new();
     io::stdin().read_to_end(&mut buffer)?;
     Ok(Some(buffer))
 }
 
-/// Tests for piped stdin handling
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
-    fn test_spreadsheet_load_from_buffer() {
-        let mut spreadsheet = spreadsheet::Spreadsheet::new();
-        let data = b"col1 col2 col3\nval1 val2 val3";
-        
-        spreadsheet.load_from_buffer(data).unwrap();
-        
-        assert_eq!(spreadsheet.get_cell(0, 0), "col1");
-        assert_eq!(spreadsheet.get_cell(0, 1), "col2");
-        assert_eq!(spreadsheet.get_cell(0, 2), "col3");
-        assert_eq!(spreadsheet.get_cell(1, 0), "val1");
-        assert_eq!(spreadsheet.get_cell(1, 1), "val2");
-        assert_eq!(spreadsheet.get_cell(1, 2), "val3");
+    fn explicit_file_skips_stdin() {
+        let args = Args::try_parse_from(["xl", "--file", "spreadsheet.csv"]).unwrap();
+        let mut sheet = Spreadsheet::new();
+        args.load_input(&mut sheet, || panic!("file input should skip stdin"))
+            .unwrap();
+        assert_eq!(sheet.get_cell(0, 0), "First");
+        assert_eq!(sheet.get_cell(0, 1), "Last");
     }
-    
+
     #[test]
-    #[cfg(unix)]
-    fn test_dev_tty_exists() {
-        // Verify /dev/tty exists on Unix systems (required for piped stdin support)
-        use std::fs::metadata;
-        assert!(metadata("/dev/tty").is_ok(), "/dev/tty should exist on Unix systems");
+    fn startup_uses_explicit_stdin_format() {
+        let args = Args::try_parse_from(["xl", "--stdin-format", "csv"]).unwrap();
+        let mut sheet = Spreadsheet::new();
+        args.load_input(&mut sheet, || Ok(Some(b"two words\n".to_vec())))
+            .unwrap();
+        assert_eq!(sheet.get_cell(0, 0), "two words");
+
+        let error = args
+            .load_input(&mut sheet, || Ok(Some(b"first,last\nJane\n".to_vec())))
+            .unwrap_err();
+        assert!(error.to_string().contains("Error loading stdin"));
+        assert_eq!(sheet.get_cell(0, 0), "two words");
     }
-    
+
     #[test]
-    #[cfg(unix)]
-    fn test_dev_tty_is_openable() {
-        // Verify we can open /dev/tty (may fail in CI environments without a TTY)
-        use std::fs::File;
-        // This test documents the behavior - it may fail in headless CI
-        // In real usage, the error is handled gracefully
-        let result = File::open("/dev/tty");
-        // We don't assert success because CI might not have a TTY,
-        // but we verify the operation doesn't panic
-        let _ = result;
+    fn default_startup_detects_sample_csv() {
+        let args = Args::try_parse_from(["xl"]).unwrap();
+        let mut sheet = Spreadsheet::new();
+        let data = include_bytes!("../spreadsheet.csv");
+        args.load_input(&mut sheet, || Ok(Some(data.to_vec())))
+            .unwrap();
+        assert_eq!(sheet.get_cell(0, 0), "First");
+        assert_eq!(sheet.get_cell(0, 1), "Last");
+        assert_eq!(sheet.get_cell(2, 0), "Jane");
+        assert_eq!(sheet.get_cell(2, 1), "Smith");
+    }
+
+    #[test]
+    fn stdin_format_requires_a_valid_value_and_excludes_file() {
+        use clap::error::ErrorKind;
+
+        let kind = |args: &[&str]| Args::try_parse_from(args).err().unwrap().kind();
+        assert_eq!(
+            kind(&["xl", "--stdin-format", "xlsx"]),
+            ErrorKind::InvalidValue
+        );
+        assert_eq!(
+            kind(&["xl", "-f", "data.csv", "--stdin-format", "auto"]),
+            ErrorKind::ArgumentConflict
+        );
     }
 }
 
@@ -94,40 +145,26 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
 
-    // CRITICAL: Read all piped data from stdin FIRST, before any terminal setup.
-    // The use-dev-tty feature makes crossterm read from /dev/tty directly,
-    // but we still need to consume the piped data before it's lost.
-    let piped_data = read_piped_stdin()?;
-    
+    // Load input before setting up the interactive terminal.
+    let mut spreadsheet = Spreadsheet::new();
+    if let Err(error) = args.load_input(&mut spreadsheet, read_piped_stdin) {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
+
     // Check if stdout is a TTY (required for terminal UI)
     if !atty::is(atty::Stream::Stdout) {
         eprintln!("Error: stdout must be a terminal to run xl interactively");
         eprintln!("When piping data, xl loads the data but requires a terminal for display");
         std::process::exit(1);
     }
-    
+
     // Load settings
     let settings = settings::Settings::load();
 
-    // Now create and populate the spreadsheet
-    let mut spreadsheet = crate::spreadsheet::Spreadsheet::new();
     spreadsheet.dark_mode = settings.dark_mode;
     spreadsheet.hide_update_prompt = settings.hide_update_prompt;
-    
-    if let Some(data) = piped_data {
-        // Load data from the buffer we read earlier
-        if let Err(e) = spreadsheet.load_from_buffer(&data) {
-            eprintln!("Error loading data from stdin: {}", e);
-            std::process::exit(1);
-        }
-    } else if let Some(ref filepath) = args.file {
-        // Load from file if provided
-        if let Err(e) = spreadsheet.load_from_file(filepath) {
-            eprintln!("Error loading file '{}': {}", filepath, e);
-            std::process::exit(1);
-        }
-    }
-    
+
     // Spawn update checker in background
     let update_rx = update::spawn_update_checker();
 
@@ -149,8 +186,10 @@ fn main() -> io::Result<()> {
     )?;
     terminal.show_cursor()?;
 
-    if let Err(err) = res {
-        eprintln!("Error: {err}");
+    match res {
+        Ok(Some(message)) => eprintln!("{message}"),
+        Ok(None) => {}
+        Err(err) => eprintln!("Error: {err}"),
     }
 
     Ok(())
