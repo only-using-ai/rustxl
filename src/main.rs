@@ -184,8 +184,10 @@ fn main() -> io::Result<()> {
     )?;
     terminal.show_cursor()?;
 
-    if let Err(err) = res {
-        eprintln!("Error: {err}");
+    match res {
+        Ok(Some(message)) => eprintln!("{message}"),
+        Ok(None) => {}
+        Err(err) => eprintln!("Error: {err}"),
     }
 
     Ok(())
