@@ -1,4 +1,11 @@
-use std::{borrow::Cow, collections::HashSet};
+#[cfg(test)]
+#[path = "formula_probe.rs"]
+mod probe;
+
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+};
 
 use crate::{formula_ref, shell, spreadsheet::Spreadsheet};
 
@@ -17,9 +24,10 @@ impl FormulaError {
     }
 }
 
-struct FormulaEvaluator<'a> {
+pub(crate) struct FormulaEvaluator<'a> {
     sheet: &'a Spreadsheet,
     active_cells: HashSet<(usize, usize)>,
+    completed: HashMap<(usize, usize), Result<String, FormulaError>>,
     // Numeric and range helpers use Option for normal nonnumeric values. Keep
     // a formula error separately so their callers cannot silently treat it as blank.
     error: Option<FormulaError>,
@@ -38,8 +46,9 @@ fn binary_operator(expr: &str) -> Option<usize> {
 }
 
 impl Spreadsheet {
+    #[cfg(test)]
     pub fn evaluate_cell(&self, row: usize, col: usize) -> String {
-        FormulaEvaluator::new(self).evaluate_cell(row, col)
+        FormulaEvaluator::new(self).evaluate(row, col)
     }
 
     #[cfg(test)]
@@ -49,12 +58,20 @@ impl Spreadsheet {
 }
 
 impl<'sheet> FormulaEvaluator<'sheet> {
-    fn new(sheet: &'sheet Spreadsheet) -> Self {
+    pub(crate) fn new(sheet: &'sheet Spreadsheet) -> Self {
         Self {
             sheet,
             active_cells: HashSet::new(),
+            completed: HashMap::new(),
             error: None,
         }
+    }
+
+    /// Resolve an independent root in this read-only evaluation pass.
+    pub(crate) fn evaluate(&mut self, row: usize, col: usize) -> String {
+        debug_assert!(self.active_cells.is_empty());
+        self.error = None;
+        self.evaluate_cell(row, col)
     }
 
     fn evaluate_cell(&mut self, row: usize, col: usize) -> String {
@@ -65,12 +82,31 @@ impl<'sheet> FormulaEvaluator<'sheet> {
         if !content.starts_with('=') {
             return content.to_string();
         }
-        if !self.active_cells.insert((row, col)) {
+        let coordinate = (row, col);
+        if let Some(cached) = self.completed.get(&coordinate) {
+            return match cached {
+                Ok(value) => value.clone(),
+                Err(error) => {
+                    self.error = Some(*error);
+                    error.display()
+                }
+            };
+        }
+        if !self.active_cells.insert(coordinate) {
             self.error = Some(FormulaError::Cycle);
             return FormulaError::Cycle.display();
         }
+        #[cfg(test)]
+        probe::record_body(row, col);
         let result = self.evaluate_formula(content, row, col);
-        self.active_cells.remove(&(row, col));
+        self.active_cells.remove(&coordinate);
+        let completed = match self.error {
+            None => Ok(result.clone()),
+            Some(error @ FormulaError::Reference) => Err(error),
+            // This result depends on the current active path.
+            Some(FormulaError::Cycle) => return result,
+        };
+        self.completed.insert(coordinate, completed);
         result
     }
 
@@ -1578,6 +1614,97 @@ impl<'sheet> FormulaEvaluator<'sheet> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn formula_cache_evaluates_each_formula_body_once_in_a_depth_16_pass() {
+        let mut sheet = probe::depth_16_chain();
+        for (seed, expected) in [("1", "65536"), ("2", "131072")] {
+            sheet.set_cell(0, 0, seed.into());
+            let (value, counts) =
+                probe::count_bodies(|| sheet.evaluate_cell(probe::CHAIN_DEPTH, 0));
+            assert_eq!(value, expected);
+            assert_eq!(counts.len(), probe::CHAIN_DEPTH);
+            assert_eq!(counts.values().sum::<usize>(), probe::CHAIN_DEPTH);
+            assert!(counts.values().all(|&runs| runs == 1));
+        }
+    }
+
+    #[test]
+    fn formula_cache_preserves_lazy_branches_and_errors_across_roots() {
+        let mut sheet = Spreadsheet::new();
+        for (col, formula) in [
+            "=B1",
+            "=A1",
+            "=IF(0,A1,7)",
+            "=SUM(C1,C1)",
+            "=IFERROR(F1,2)",
+            "=#REF!",
+            "=SUM(F1,7)",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            sheet.set_cell(0, col, formula.into());
+        }
+        let mut pass = FormulaEvaluator::new(&sheet);
+        let ((), counts) = probe::count_bodies(|| {
+            for (col, result) in [
+                (0, "#CYCLE!"),
+                (2, "7"),
+                (4, "2"),
+                (6, "#REF!"),
+                (5, "#REF!"),
+                (3, "14"),
+                (4, "2"),
+                (1, "#CYCLE!"),
+            ] {
+                assert_eq!(pass.evaluate(0, col), result);
+            }
+        });
+        assert_eq!(counts[&(0, 0)], 2);
+        assert_eq!(counts[&(0, 1)], 2);
+        assert_eq!(counts[&(0, 2)], 1);
+        assert_eq!(counts[&(0, 4)], 1);
+        assert_eq!(counts[&(0, 5)], 1);
+    }
+
+    #[test]
+    fn grid_and_selection_passes_share_dependencies_and_refresh_after_edit() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut sheet = Spreadsheet::new();
+        for (col, value) in ["1500", "=SUM(A1,A1)", "=SUM(B1,B1)", "=B1"]
+            .into_iter()
+            .enumerate()
+        {
+            sheet.set_cell(0, col, value.into());
+        }
+        let mut terminal = Terminal::new(TestBackend::new(80, 10)).unwrap();
+        for (seed, displayed, sum) in [("1500", "6000", 12000.0), ("2600", "10400", 20800.0)] {
+            sheet.set_cell(0, 0, seed.into());
+            sheet.selection_anchor = None;
+            let ((), grid_counts) = probe::count_bodies(|| {
+                terminal
+                    .draw(|frame| crate::ui::render(frame, &mut sheet))
+                    .unwrap();
+            });
+            let rendered: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(rendered.contains(displayed));
+            assert_eq!(grid_counts.values().sum::<usize>(), 3);
+
+            sheet.selection_anchor = Some((0, 1));
+            sheet.cursor_col = 3;
+            let (stats, stats_counts) = probe::count_bodies(|| sheet.get_selection_stats());
+            assert_eq!(stats, Some((1, 3, 3, sum)));
+            assert_eq!(stats_counts.values().sum::<usize>(), 3);
+        }
+    }
 
     #[test]
     fn test_parse_cell_ref() {

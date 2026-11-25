@@ -7,6 +7,7 @@ use crate::clipboard::{
     ClipboardBackend, ClipboardRead, ClipboardText, Generation, Publication, export_token,
 };
 use crate::constants::{DEFAULT_COLS, DEFAULT_ROWS};
+use crate::formula::FormulaEvaluator;
 use crate::formula_ref::{self, Axis, Edit};
 use crate::shell::ShellPrompt;
 use crate::types::{CellStyle, RowColumnSelectMode, SaveFormat, StdinFormat, VisualSubMode};
@@ -668,7 +669,7 @@ impl Spreadsheet {
 
     /// Returns selection stats: (row_count, cell_count, numeric_count, sum) for the current selection
     /// Returns None if no multi-cell selection exists
-    pub fn get_selection_stats(&mut self) -> Option<(usize, usize, usize, f64)> {
+    pub fn get_selection_stats(&self) -> Option<(usize, usize, usize, f64)> {
         // Get the effective selection range - could be from selection_anchor, selected_rows, or selected_cols
         let range = if let Some(((min_row, min_col), (max_row, max_col))) = self.get_selection_range() {
             // Regular cell selection
@@ -692,6 +693,7 @@ impl Spreadsheet {
         let mut numeric_count = 0usize;
         let mut sum = 0.0f64;
         let mut rows_with_data = std::collections::HashSet::new();
+        let mut formulas = FormulaEvaluator::new(self);
 
         for row in min_row..=max_row {
             for col in min_col..=max_col {
@@ -700,7 +702,7 @@ impl Spreadsheet {
                     cell_count += 1;
                     rows_with_data.insert(row);
                     // Evaluate the cell to get the actual value (handles formulas)
-                    let evaluated = self.evaluate_cell(row, col);
+                    let evaluated = formulas.evaluate(row, col);
                     if let Ok(val) = evaluated.parse::<f64>() {
                         numeric_count += 1;
                         sum += val;
