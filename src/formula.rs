@@ -1037,38 +1037,33 @@ impl<'sheet> FormulaEvaluator<'sheet> {
         // Find matching row
         let target_col = table_cells[0].1; // First column for lookup
         let mut matching_row = None;
+        let lookup_num = lookup_value.parse::<f64>().ok();
 
-        for (row, col) in &table_cells {
-            if *col == target_col {
-                let cell_value = self.raw_cell_with_dependency(*row, *col);
-                if approximate {
-                    // Approximate match - find the largest value <= lookup_value
-                    if let Some(cell_num) = cell_value.parse::<f64>().ok() {
-                        if let Some(lookup_num) = lookup_value.parse::<f64>().ok() {
-                            if cell_num <= lookup_num {
-                                matching_row = Some(*row);
-                            } else {
-                                break;
-                            }
-                        }
-                    } else if cell_value == lookup_value {
-                        matching_row = Some(*row);
-                        break;
-                    }
-                } else {
-                    // Exact match
-                    if let Some(cell_num) = cell_value.parse::<f64>().ok() {
-                        if let Some(lookup_num) = lookup_value.parse::<f64>().ok() {
-                            if cell_num == lookup_num {
-                                matching_row = Some(*row);
-                                break;
-                            }
-                        }
-                    } else if cell_value == lookup_value {
-                        matching_row = Some(*row);
+        for &(row, col) in &table_cells {
+            if col != target_col {
+                continue;
+            }
+            let cell_value = self.evaluate_cell(row, col);
+            if let Some(error) = self.error {
+                return error.display();
+            }
+            match (cell_value.parse::<f64>(), lookup_num) {
+                (Ok(key), Some(lookup)) if approximate => {
+                    if key <= lookup {
+                        matching_row = Some(row);
+                    } else {
                         break;
                     }
                 }
+                (Ok(key), Some(lookup)) if key == lookup => {
+                    matching_row = Some(row);
+                    break;
+                }
+                (Err(_), _) if cell_value == lookup_value => {
+                    matching_row = Some(row);
+                    break;
+                }
+                _ => {}
             }
         }
 
@@ -2306,6 +2301,36 @@ mod tests {
             sheet.evaluate_formula("=VLOOKUP(0.0000000000000001,A1:B2,2,FALSE)", 0, 3),
             "High"
         );
+    }
+
+    #[test]
+    fn vlookup_compares_evaluated_numeric_and_text_keys() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "10".into());
+        sheet.set_cell(0, 1, "Low".into());
+        sheet.set_cell(1, 0, "=10+10".into());
+        sheet.set_cell(1, 1, "High".into());
+        for (formula, expected) in [
+            ("=VLOOKUP(20,A1:B2,2,FALSE)", "High"),
+            ("=VLOOKUP(21,A1:B2,2,TRUE)", "High"),
+            ("=VLOOKUP(15,A1:B2,2,TRUE)", "Low"),
+        ] {
+            assert_eq!(sheet.evaluate_formula(formula, 0, 3), expected, "{formula}");
+        }
+
+        sheet.set_cell(1, 0, r#"=CONCAT("High",", noon")"#.into());
+        assert_eq!(
+            sheet.evaluate_formula(r#"=VLOOKUP("High, noon",A1:B2,2,FALSE)"#, 0, 3),
+            "High"
+        );
+
+        for (key, expected) in [("=D1", "#CYCLE!"), ("=#REF!", "#REF!")] {
+            sheet.set_cell(1, 0, key.into());
+            for mode in ["FALSE", "TRUE"] {
+                sheet.set_cell(0, 3, format!("=VLOOKUP(21,A1:B2,2,{mode})"));
+                assert_eq!(sheet.evaluate_cell(0, 3), expected, "{mode}");
+            }
+        }
     }
 
     #[test]
