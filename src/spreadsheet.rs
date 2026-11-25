@@ -4,6 +4,7 @@ use std::io::{self, Read};
 use ratatui::layout::Rect;
 
 use crate::constants::{DEFAULT_COLS, DEFAULT_ROWS};
+use crate::formula_ref::{self, Axis, Edit};
 use crate::shell::ShellPrompt;
 use crate::types::{CellStyle, RowColumnSelectMode, SaveFormat, StdinFormat, VisualSubMode};
 use crate::update::UpdateInfo;
@@ -966,6 +967,13 @@ impl Spreadsheet {
             for row in (min_row..=max_row).rev() {
                 self.delete_row(row);
             }
+            self.rewrite_formulas(
+                Axis::Row,
+                Edit::Delete {
+                    first: min_row,
+                    last: max_row,
+                },
+            );
             // Adjust cursor position
             if self.cursor_row >= min_row {
                 if self.cursor_row <= max_row {
@@ -985,6 +993,13 @@ impl Spreadsheet {
             for col in (min_col..=max_col).rev() {
                 self.delete_column(col);
             }
+            self.rewrite_formulas(
+                Axis::Column,
+                Edit::Delete {
+                    first: min_col,
+                    last: max_col,
+                },
+            );
             // Adjust cursor position
             if self.cursor_col >= min_col {
                 if self.cursor_col <= max_col {
@@ -1006,6 +1021,13 @@ impl Spreadsheet {
             for _ in 0..count {
                 self.insert_row_after(insert_after);
             }
+            self.rewrite_formulas(
+                Axis::Row,
+                Edit::Insert {
+                    at: insert_after + 1,
+                    count,
+                },
+            );
             // Move cursor to the first newly inserted row
             self.cursor_row = insert_after + 1;
             self.selected_rows = Some((insert_after + 1, insert_after + count));
@@ -1021,9 +1043,24 @@ impl Spreadsheet {
             for _ in 0..count {
                 self.insert_column_after(insert_after);
             }
+            self.rewrite_formulas(
+                Axis::Column,
+                Edit::Insert {
+                    at: insert_after + 1,
+                    count,
+                },
+            );
             // Move cursor to the first newly inserted column
             self.cursor_col = insert_after + 1;
             self.selected_cols = Some((insert_after + 1, insert_after + count));
+        }
+    }
+
+    fn rewrite_formulas(&mut self, axis: Axis, edit: Edit) {
+        for value in self.cells.values_mut() {
+            if let Some(updated) = formula_ref::rewrite(value, axis, edit) {
+                *value = updated;
+            }
         }
     }
 
