@@ -3,12 +3,18 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{
+    Terminal,
+    backend::{Backend, CrosstermBackend},
+    layout::Size,
+};
 
 use crate::clipboard::{ClipboardBackend, SystemClipboard};
 use crate::constants::COLOR_PALETTE;
 use crate::settings;
 use crate::shell;
+#[cfg(test)]
+use crate::sparse_ui_probe::{self, Work};
 use crate::spreadsheet::Spreadsheet;
 use crate::types::{DataType, RowColumnSelectMode, SaveFormat, TextAlignment, VerticalAlignment, VisualSubMode};
 use crate::ui;
@@ -47,37 +53,29 @@ pub fn run_app(
 ) -> io::Result<Option<String>> {
     let mut clipboard = SystemClipboard::default();
     let mut active_install = ActiveInstall::default();
+    let mut redraw = true;
+    let mut drawn_size = None;
 
     loop {
-        poll_update_install(&mut spreadsheet, &mut active_install);
+        redraw |= poll_update_install(&mut spreadsheet, &mut active_install);
         if active_install.ready_for_deferred_quit() {
             return Ok(spreadsheet.update_message.take());
         }
-        // Check for update messages (non-blocking)
         if let Ok(msg) = update_rx.try_recv() {
-            match msg {
-                UpdateMessage::Available(info) => {
-                    spreadsheet.update_available = Some(info);
-                    if !spreadsheet.hide_update_prompt && active_install.receiver.is_none() {
-                        spreadsheet.update_prompt_shown = true;
-                    }
-                }
-                UpdateMessage::NotAvailable => {}
-                UpdateMessage::Error(_) => {
-                    // Silently ignore update check errors (network issues, etc.)
-                    // The update check will be retried on next launch
-                }
-            }
+            redraw |= apply_update_discovery(&mut spreadsheet, msg);
         }
 
-        let drawn_size = terminal
-            .draw(|f| ui::render(f, &mut spreadsheet))?
-            .area
-            .as_size();
+        if let Some(size) = redraw_if_needed(terminal, &mut spreadsheet, &mut redraw)? {
+            drawn_size = Some(size);
+        }
 
         // Use poll with timeout to allow checking update messages periodically
         if event::poll(Duration::from_millis(100))? {
-            match event::read() {
+            let event = event::read();
+            if let Ok(event) = &event {
+                redraw |= event_requests_redraw(event);
+            }
+            match event {
                 Ok(Event::Key(key)) => {
                     if key.kind != KeyEventKind::Press {
                         continue;
@@ -87,7 +85,7 @@ pub fn run_app(
                     if spreadsheet.shell_prompt.is_some() {
                         let confirming = matches!(key.code, KeyCode::Char('r' | 'a'));
                         if key.modifiers.is_empty()
-                            && (!confirming || terminal.size()? == drawn_size)
+                            && (!confirming || Some(terminal.size()?) == drawn_size)
                         {
                             handle_shell_prompt(&mut spreadsheet, key.code, shell::run_command);
                         }
@@ -104,7 +102,7 @@ pub fn run_app(
                         return Ok(None);
                     }
                 }
-                Ok(_) => {} // Ignore non-key events
+                Ok(_) => {}
                 Err(e) => {
                     // If we can't read events, it might be a terminal issue
                     // Try to restore terminal and exit gracefully
@@ -153,6 +151,39 @@ fn handle_sheet_key(
     } else {
         return handle_ready_mode(spreadsheet, key.code, key.modifiers, clipboard)
             && active_install.defer_or_allow_quit(spreadsheet);
+    }
+    false
+}
+
+pub(crate) fn redraw_if_needed<B: Backend>(
+    terminal: &mut Terminal<B>,
+    spreadsheet: &mut Spreadsheet,
+    redraw: &mut bool,
+) -> Result<Option<Size>, B::Error> {
+    if !std::mem::take(redraw) {
+        return Ok(None);
+    }
+    #[cfg(test)]
+    sparse_ui_probe::record(Work::Draw);
+    let frame = terminal.draw(|frame| ui::render(frame, spreadsheet))?;
+    Ok(Some(frame.area.as_size()))
+}
+
+fn event_requests_redraw(event: &Event) -> bool {
+    match event {
+        Event::Key(key) => key.kind == KeyEventKind::Press,
+        Event::Resize(..) => true,
+        _ => false,
+    }
+}
+
+fn apply_update_discovery(spreadsheet: &mut Spreadsheet, message: UpdateMessage) -> bool {
+    if let UpdateMessage::Available(info) = message {
+        spreadsheet.update_available = Some(info);
+        if !spreadsheet.hide_update_prompt && !spreadsheet.update_in_progress {
+            spreadsheet.update_prompt_shown = true;
+            return true;
+        }
     }
     false
 }
@@ -953,6 +984,9 @@ mod tests {
     use super::*;
     use crate::clipboard::OfflineClipboard;
     use crate::shell::ShellStep;
+    use crate::sparse_ui_probe::count_work;
+    use crate::update::UpdateInfo;
+    use crossterm::event::KeyEvent;
     use ratatui::backend::TestBackend;
 
     fn open_shell_preview(sheet: &mut Spreadsheet) {
@@ -974,6 +1008,10 @@ mod tests {
 
     fn render_sheet(terminal: &mut Terminal<TestBackend>, sheet: &mut Spreadsheet) -> String {
         terminal.draw(|frame| ui::render(frame, sheet)).unwrap();
+        screen_text(terminal)
+    }
+
+    fn screen_text(terminal: &Terminal<TestBackend>) -> String {
         terminal
             .backend()
             .buffer()
@@ -1122,6 +1160,123 @@ mod tests {
                 .unwrap()
                 .contains("Installer exited")
         );
+    }
+
+    #[test]
+    fn install_completion_refreshes_an_idle_screen_once() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut install = ActiveInstall {
+            receiver: Some(rx),
+            quit_when_done: false,
+        };
+        let mut sheet = Spreadsheet::new();
+        sheet.update_in_progress = true;
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
+        let mut redraw = true;
+        redraw_if_needed(&mut terminal, &mut sheet, &mut redraw).unwrap();
+
+        tx.send(Ok("v2.0.0".into())).unwrap();
+        let ((), work) = count_work(|| {
+            for _ in 0..2 {
+                redraw |= poll_update_install(&mut sheet, &mut install);
+                redraw_if_needed(&mut terminal, &mut sheet, &mut redraw).unwrap();
+            }
+        });
+        assert_eq!(work.draws, 1);
+        assert!(screen_text(&terminal).contains("Updated to v2.0.0"));
+    }
+
+    #[test]
+    fn redraw_requests_refresh_stats_and_updates_without_idle_work() {
+        let mut sheet = Spreadsheet::new();
+        sheet.num_rows = 1000;
+        sheet.num_cols = 1000;
+        sheet.set_cell(0, 0, "7".into());
+        sheet.selection_anchor = Some((0, 0));
+        sheet.cursor_row = 999;
+        sheet.cursor_col = 999;
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
+        let mut redraw = true;
+
+        let ((), work) = count_work(|| {
+            for _ in 0..=20 {
+                redraw_if_needed(&mut terminal, &mut sheet, &mut redraw).unwrap();
+            }
+        });
+        assert_eq!(work.draws, 1);
+        assert_eq!(work.selection_candidates, 1);
+        assert!(screen_text(&terminal).contains("Sum: 7"));
+
+        let release = Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Enter,
+            KeyModifiers::empty(),
+            KeyEventKind::Release,
+        ));
+        assert!(!event_requests_redraw(&release));
+        redraw |= apply_update_discovery(&mut sheet, UpdateMessage::NotAvailable);
+        assert_eq!(
+            redraw_if_needed(&mut terminal, &mut sheet, &mut redraw).unwrap(),
+            None
+        );
+
+        redraw |= event_requests_redraw(&Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::empty(),
+        )));
+        sheet.set_cell(0, 0, "9".into());
+        redraw_if_needed(&mut terminal, &mut sheet, &mut redraw).unwrap();
+        assert!(screen_text(&terminal).contains("Sum: 9"));
+
+        terminal.backend_mut().resize(90, 14);
+        redraw |= event_requests_redraw(&Event::Resize(90, 14));
+        assert_eq!(
+            redraw_if_needed(&mut terminal, &mut sheet, &mut redraw).unwrap(),
+            Some(Size::new(90, 14))
+        );
+
+        redraw |= apply_update_discovery(
+            &mut sheet,
+            UpdateMessage::Available(UpdateInfo {
+                current_version: "0.1.0".into(),
+                latest_version: "9.9.9".into(),
+                download_url: String::new(),
+                asset_name: String::new(),
+            }),
+        );
+        redraw_if_needed(&mut terminal, &mut sheet, &mut redraw).unwrap();
+        assert!(screen_text(&terminal).contains("New version 9.9.9"));
+    }
+
+    #[test]
+    fn redraw_requests_keep_shell_preview_in_sync_with_resizes_and_stages() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(0, 0, "=SHELL(echo example)".into());
+        let mut terminal = Terminal::new(TestBackend::new(72, 8)).unwrap();
+        let mut redraw = true;
+        open_shell_preview(&mut sheet);
+        redraw_if_needed(&mut terminal, &mut sheet, &mut redraw).unwrap();
+        assert!(screen_text(&terminal).contains("echo example"));
+
+        terminal.backend_mut().resize(72, 3);
+        redraw |= event_requests_redraw(&Event::Resize(72, 3));
+        redraw_if_needed(&mut terminal, &mut sheet, &mut redraw).unwrap();
+        press_shell_key(&mut sheet, KeyCode::Char('r'));
+        assert!(screen_text(&terminal).contains("Resize to review SHELL"));
+
+        terminal.backend_mut().resize(72, 8);
+        redraw |= event_requests_redraw(&Event::Resize(72, 8));
+        redraw_if_needed(&mut terminal, &mut sheet, &mut redraw).unwrap();
+        redraw |= event_requests_redraw(&Event::Key(KeyEvent::new(
+            KeyCode::Char('r'),
+            KeyModifiers::empty(),
+        )));
+        handle_shell_prompt(&mut sheet, KeyCode::Char('r'), |_| Ok("result".into()));
+        press_shell_key(&mut sheet, KeyCode::Char('a'));
+        assert_eq!(sheet.get_cell(0, 0), "=SHELL(echo example)");
+        redraw_if_needed(&mut terminal, &mut sheet, &mut redraw).unwrap();
+        assert!(screen_text(&terminal).contains("Destination range A1"));
+        press_shell_key(&mut sheet, KeyCode::Char('a'));
+        assert_eq!(sheet.get_cell(0, 0), "result");
     }
 
     #[test]

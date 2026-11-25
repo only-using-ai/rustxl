@@ -15,7 +15,11 @@ use crate::constants::{
     DARK_GRID_COLOR, DARK_HEADER_BG, DARK_HEADER_FG, DARK_REF_RANGE_BG, DARK_REF_SELECTION_BG,
     DARK_SELECTED_BG, DARK_SELECTED_HEADER_BG, DARK_FIND_MATCH_BG,
 };
-use crate::{formula::FormulaEvaluator, shell::ShellStep, spreadsheet::Spreadsheet};
+use crate::{
+    formula::FormulaEvaluator,
+    shell::ShellStep,
+    spreadsheet::{SelectionStats, Spreadsheet},
+};
 use crate::types::{DataType, RowColumnSelectMode, SaveFormat, TextAlignment, VerticalAlignment, VisualSubMode};
 
 fn format_cell_by_type(value: &str, data_type: DataType) -> String {
@@ -75,8 +79,8 @@ pub fn render(f: &mut Frame, spreadsheet: &mut Spreadsheet) {
         return;
     }
 
-    // Check if we have selection stats to show
-    let has_stats = spreadsheet.get_selection_stats().is_some();
+    let stats = spreadsheet.get_selection_stats();
+    let has_stats = stats.is_some();
     // Check if we need to show update prompt or message
     let has_update = spreadsheet.update_prompt_shown || spreadsheet.update_message.is_some();
     // Check if we need to show autocomplete suggestions
@@ -138,8 +142,8 @@ pub fn render(f: &mut Frame, spreadsheet: &mut Spreadsheet) {
         render_autocomplete(f, spreadsheet, autocomplete_area);
     }
     render_grid(f, spreadsheet, grid_area, visible_cols, visible_rows);
-    if let Some(stats_area) = stats_area {
-        render_stats_bar(f, spreadsheet, stats_area);
+    if let (Some(stats), Some(stats_area)) = (stats, stats_area) {
+        render_stats_bar(f, stats, stats_area);
     }
     render_status_bar(f, spreadsheet, status_area);
     
@@ -661,42 +665,44 @@ fn render_grid(
     f.render_widget(table, area);
 }
 
-fn render_stats_bar(f: &mut Frame, spreadsheet: &mut Spreadsheet, area: Rect) {
-    if let Some((row_count, cell_count, numeric_count, sum)) = spreadsheet.get_selection_stats() {
-        let mut spans = vec![
-            Span::styled("  Rows: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{}", row_count), Style::default().fg(Color::White)),
-            Span::styled("  Cells: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{}", cell_count), Style::default().fg(Color::White)),
-        ];
+fn render_stats_bar(
+    f: &mut Frame,
+    (row_count, cell_count, numeric_count, sum): SelectionStats,
+    area: Rect,
+) {
+    let mut spans = vec![
+        Span::styled("  Rows: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{}", row_count), Style::default().fg(Color::White)),
+        Span::styled("  Cells: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{}", cell_count), Style::default().fg(Color::White)),
+    ];
 
-        if numeric_count > 0 {
-            spans.push(Span::styled("  Sum: ", Style::default().fg(Color::DarkGray)));
-            // Format sum nicely - remove trailing zeros for integers
-            let sum_str = if sum.fract() == 0.0 {
-                format!("{:.0}", sum)
-            } else {
-                format!("{}", sum)
-            };
-            spans.push(Span::styled(sum_str, Style::default().fg(Color::Cyan)));
-            
-            // Also show average
-            let avg = sum / numeric_count as f64;
-            spans.push(Span::styled("  Avg: ", Style::default().fg(Color::DarkGray)));
-            let avg_str = if avg.fract() == 0.0 {
-                format!("{:.0}", avg)
-            } else {
-                format!("{:.2}", avg)
-            };
-            spans.push(Span::styled(avg_str, Style::default().fg(Color::Cyan)));
-        }
+    if numeric_count > 0 {
+        spans.push(Span::styled("  Sum: ", Style::default().fg(Color::DarkGray)));
+        // Format sum nicely - remove trailing zeros for integers
+        let sum_str = if sum.fract() == 0.0 {
+            format!("{:.0}", sum)
+        } else {
+            format!("{}", sum)
+        };
+        spans.push(Span::styled(sum_str, Style::default().fg(Color::Cyan)));
 
-        let stats_line = Line::from(spans);
-        f.render_widget(
-            Paragraph::new(stats_line).style(Style::default().bg(Color::Rgb(35, 35, 35))),
-            area,
-        );
+        // Also show average
+        let avg = sum / numeric_count as f64;
+        spans.push(Span::styled("  Avg: ", Style::default().fg(Color::DarkGray)));
+        let avg_str = if avg.fract() == 0.0 {
+            format!("{:.0}", avg)
+        } else {
+            format!("{:.2}", avg)
+        };
+        spans.push(Span::styled(avg_str, Style::default().fg(Color::Cyan)));
     }
+
+    let stats_line = Line::from(spans);
+    f.render_widget(
+        Paragraph::new(stats_line).style(Style::default().bg(Color::Rgb(35, 35, 35))),
+        area,
+    );
 }
 
 fn render_status_bar(f: &mut Frame, spreadsheet: &Spreadsheet, area: Rect) {

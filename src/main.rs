@@ -6,6 +6,8 @@ mod input;
 mod save;
 mod settings;
 mod shell;
+#[cfg(test)]
+mod sparse_ui_probe;
 mod spreadsheet;
 mod style;
 mod types;
