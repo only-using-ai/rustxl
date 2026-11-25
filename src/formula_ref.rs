@@ -206,6 +206,26 @@ fn word_prefix(text: &str) -> &str {
     &text[..text.find(|ch| !is_word_char(ch)).unwrap_or(text.len())]
 }
 
+pub fn top_level_delimiters(text: &str, delimiter: u8) -> impl Iterator<Item = usize> + '_ {
+    let bytes = text.as_bytes();
+    let mut cursor = 0;
+    std::iter::from_fn(move || {
+        let mut depth = 0usize;
+        while let Some(&byte) = bytes.get(cursor) {
+            let index = cursor;
+            cursor += 1;
+            match byte {
+                b'"' | b'\'' => cursor = quoted_end(text, index),
+                b'(' => depth += 1,
+                b')' => depth = depth.saturating_sub(1),
+                _ if byte == delimiter && depth == 0 => return Some(index),
+                _ => {}
+            }
+        }
+        None
+    })
+}
+
 fn quoted_end(text: &str, start: usize) -> usize {
     let bytes = text.as_bytes();
     let quote = bytes[start];

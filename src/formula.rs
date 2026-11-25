@@ -25,6 +25,11 @@ struct FormulaEvaluator<'a> {
     error: Option<FormulaError>,
 }
 
+enum AggregateInput<'a> {
+    Cell(usize, usize),
+    Scalar(&'a str),
+}
+
 impl Spreadsheet {
     pub fn evaluate_cell(&self, row: usize, col: usize) -> String {
         FormulaEvaluator::new(self).evaluate_cell(row, col)
@@ -84,31 +89,31 @@ impl<'sheet> FormulaEvaluator<'sheet> {
         // Handle SUM function (case-insensitive)
         if expr_upper.starts_with("SUM(") && expr_upper.ends_with(')') {
             let inner = &expr[4..expr.len() - 1];
-            return self.evaluate_sum(inner);
+            return self.evaluate_sum(inner, (row, col));
         }
 
         // Handle AVG function (case-insensitive)
         if expr_upper.starts_with("AVG(") && expr_upper.ends_with(')') {
             let inner = &expr[4..expr.len() - 1];
-            return self.evaluate_avg(inner);
+            return self.evaluate_avg(inner, (row, col));
         }
 
         // Handle MIN function (case-insensitive)
         if expr_upper.starts_with("MIN(") && expr_upper.ends_with(')') {
             let inner = &expr[4..expr.len() - 1];
-            return self.evaluate_min(inner);
+            return self.evaluate_min(inner, (row, col));
         }
 
         // Handle MAX function (case-insensitive)
         if expr_upper.starts_with("MAX(") && expr_upper.ends_with(')') {
             let inner = &expr[4..expr.len() - 1];
-            return self.evaluate_max(inner);
+            return self.evaluate_max(inner, (row, col));
         }
 
         // Handle CORREL function (case-insensitive)
         if expr_upper.starts_with("CORREL(") && expr_upper.ends_with(')') {
             let inner = &expr[7..expr.len() - 1];
-            return self.evaluate_correl(inner);
+            return self.evaluate_correl(inner, (row, col));
         }
 
         // Handle IF function (case-insensitive)
@@ -120,13 +125,13 @@ impl<'sheet> FormulaEvaluator<'sheet> {
         // Handle COUNT function (case-insensitive)
         if expr_upper.starts_with("COUNT(") && expr_upper.ends_with(')') {
             let inner = &expr[6..expr.len() - 1];
-            return self.evaluate_count(inner);
+            return self.evaluate_count(inner, (row, col));
         }
 
         // Handle COUNTA function (case-insensitive)
         if expr_upper.starts_with("COUNTA(") && expr_upper.ends_with(')') {
             let inner = &expr[7..expr.len() - 1];
-            return self.evaluate_counta(inner);
+            return self.evaluate_counta(inner, (row, col));
         }
 
         // Handle COUNTIF function (case-insensitive)
@@ -276,13 +281,13 @@ impl<'sheet> FormulaEvaluator<'sheet> {
         // Handle PRODUCT function (case-insensitive)
         if expr_upper.starts_with("PRODUCT(") && expr_upper.ends_with(')') {
             let inner = &expr[8..expr.len() - 1];
-            return self.evaluate_product(inner);
+            return self.evaluate_product(inner, (row, col));
         }
 
         // Handle MEDIAN function (case-insensitive)
         if expr_upper.starts_with("MEDIAN(") && expr_upper.ends_with(')') {
             let inner = &expr[7..expr.len() - 1];
-            return self.evaluate_median(inner);
+            return self.evaluate_median(inner, (row, col));
         }
 
         // Handle simple arithmetic
@@ -298,81 +303,81 @@ impl<'sheet> FormulaEvaluator<'sheet> {
         "#ERROR".to_string()
     }
 
-    pub fn evaluate_sum(&mut self, args: &str) -> String {
-        let mut sum = 0.0;
-
-        for arg in args.split(',') {
+    fn visit_aggregate_inputs<'args>(
+        &mut self,
+        args: &'args str,
+        mut visit: impl FnMut(&mut Self, AggregateInput<'args>),
+    ) -> Result<(), ()> {
+        for arg in self.split_function_args(args) {
             let arg = arg.trim();
-
-            if let Some((start, end)) = arg.split_once(':') {
-                if let (Some((sr, sc)), Some((er, ec))) =
-                    (self.parse_cell_ref(start), self.parse_cell_ref(end))
-                {
-                    let min_row = sr.min(er);
-                    let max_row = sr.max(er);
-                    let min_col = sc.min(ec);
-                    let max_col = sc.max(ec);
-                    for row in min_row..=max_row {
-                        for col in min_col..=max_col {
-                            if let Some(val) = self.get_cell_value_at(row, col) {
-                                sum += val;
-                            }
+            if let Some(colon) = formula_ref::top_level_delimiters(arg, b':').next() {
+                let start = self.parse_cell_ref(&arg[..colon]);
+                let end = self.parse_cell_ref(&arg[colon + 1..]);
+                let (Some((sr, sc)), Some((er, ec))) = (start, end) else {
+                    return Err(());
+                };
+                for row in sr.min(er)..=sr.max(er) {
+                    for col in sc.min(ec)..=sc.max(ec) {
+                        visit(self, AggregateInput::Cell(row, col));
+                        if self.error.is_some() {
+                            return Err(());
                         }
                     }
-                } else {
-                    return "#ERROR".to_string();
                 }
-            } else if let Some(val) = self.get_cell_value(arg) {
-                sum += val;
-            } else if let Ok(val) = arg.parse::<f64>() {
-                sum += val;
+            } else {
+                let input = match self.parse_cell_ref(arg) {
+                    Some((row, col)) => AggregateInput::Cell(row, col),
+                    None => AggregateInput::Scalar(arg),
+                };
+                visit(self, input);
+                if self.error.is_some() {
+                    return Err(());
+                }
             }
         }
+        Ok(())
+    }
 
+    fn visit_numeric_inputs(
+        &mut self,
+        args: &str,
+        (row, col): (usize, usize),
+        mut visit: impl FnMut(f64),
+    ) -> Result<(), ()> {
+        self.visit_aggregate_inputs(args, |evaluator, input| {
+            let value = match input {
+                AggregateInput::Cell(row, col) => evaluator.get_cell_value_at(row, col),
+                AggregateInput::Scalar(arg) => evaluator.evaluate_arg_as_number(arg, row, col),
+            };
+            if let Some(value) = value {
+                visit(value);
+            }
+        })
+    }
+
+    fn evaluate_sum(&mut self, args: &str, origin: (usize, usize)) -> String {
+        let mut sum = 0.0;
+        if self
+            .visit_numeric_inputs(args, origin, |value| sum += value)
+            .is_err()
+        {
+            return "#ERROR".to_string();
+        }
         format!("{}", sum)
     }
 
-    pub fn evaluate_avg(&mut self, args: &str) -> String {
+    fn evaluate_avg(&mut self, args: &str, origin: (usize, usize)) -> String {
         let mut sum = 0.0;
-        let mut count = 0.0;
-
-        for arg in args.split(',') {
-            let arg = arg.trim();
-
-            if let Some((start, end)) = arg.split_once(':') {
-                if let (Some((sr, sc)), Some((er, ec))) =
-                    (self.parse_cell_ref(start), self.parse_cell_ref(end))
-                {
-                    let min_row = sr.min(er);
-                    let max_row = sr.max(er);
-                    let min_col = sc.min(ec);
-                    let max_col = sc.max(ec);
-                    for row in min_row..=max_row {
-                        for col in min_col..=max_col {
-                            if let Some(val) = self.get_cell_value_at(row, col) {
-                                sum += val;
-                                count += 1.0;
-                            }
-                        }
-                    }
-                } else {
-                    return "#ERROR".to_string();
-                }
-            } else if let Some(val) = self.get_cell_value(arg) {
-                sum += val;
-                count += 1.0;
-            } else if let Ok(val) = arg.parse::<f64>() {
-                sum += val;
-                count += 1.0;
-            }
-        }
-
-        if count == 0.0 {
+        let mut count = 0;
+        let result = self.visit_numeric_inputs(args, origin, |value| {
+            sum += value;
+            count += 1;
+        });
+        if result.is_err() || count == 0 {
             return "#ERROR".to_string();
         }
 
-        let avg = sum / count;
-        // Format with reasonable precision
+        let avg = sum / count as f64;
         if avg.fract() == 0.0 {
             format!("{:.0}", avg)
         } else {
@@ -380,93 +385,39 @@ impl<'sheet> FormulaEvaluator<'sheet> {
         }
     }
 
-    pub fn evaluate_min(&mut self, args: &str) -> String {
+    fn evaluate_min(&mut self, args: &str, origin: (usize, usize)) -> String {
         let mut min: Option<f64> = None;
-
-        for arg in args.split(',') {
-            let arg = arg.trim();
-
-            if let Some((start, end)) = arg.split_once(':') {
-                if let (Some((sr, sc)), Some((er, ec))) =
-                    (self.parse_cell_ref(start), self.parse_cell_ref(end))
-                {
-                    let min_row = sr.min(er);
-                    let max_row = sr.max(er);
-                    let min_col = sc.min(ec);
-                    let max_col = sc.max(ec);
-                    for row in min_row..=max_row {
-                        for col in min_col..=max_col {
-                            if let Some(val) = self.get_cell_value_at(row, col) {
-                                min = Some(min.map_or(val, |m| m.min(val)));
-                            }
-                        }
-                    }
-                } else {
-                    return "#ERROR".to_string();
-                }
-            } else if let Some(val) = self.get_cell_value(arg) {
-                min = Some(min.map_or(val, |m| m.min(val)));
-            } else if let Ok(val) = arg.parse::<f64>() {
-                min = Some(min.map_or(val, |m| m.min(val)));
-            }
+        let result = self.visit_numeric_inputs(args, origin, |value| {
+            min = Some(min.map_or(value, |min| min.min(value)));
+        });
+        if result.is_err() {
+            return "#ERROR".to_string();
         }
 
         match min {
-            Some(val) => {
-                if val.fract() == 0.0 {
-                    format!("{:.0}", val)
-                } else {
-                    format!("{}", val)
-                }
-            }
+            Some(val) if val.fract() == 0.0 => format!("{:.0}", val),
+            Some(val) => format!("{}", val),
             None => "#ERROR".to_string(),
         }
     }
 
-    pub fn evaluate_max(&mut self, args: &str) -> String {
+    fn evaluate_max(&mut self, args: &str, origin: (usize, usize)) -> String {
         let mut max: Option<f64> = None;
-
-        for arg in args.split(',') {
-            let arg = arg.trim();
-
-            if let Some((start, end)) = arg.split_once(':') {
-                if let (Some((sr, sc)), Some((er, ec))) =
-                    (self.parse_cell_ref(start), self.parse_cell_ref(end))
-                {
-                    let min_row = sr.min(er);
-                    let max_row = sr.max(er);
-                    let min_col = sc.min(ec);
-                    let max_col = sc.max(ec);
-                    for row in min_row..=max_row {
-                        for col in min_col..=max_col {
-                            if let Some(val) = self.get_cell_value_at(row, col) {
-                                max = Some(max.map_or(val, |m| m.max(val)));
-                            }
-                        }
-                    }
-                } else {
-                    return "#ERROR".to_string();
-                }
-            } else if let Some(val) = self.get_cell_value(arg) {
-                max = Some(max.map_or(val, |m| m.max(val)));
-            } else if let Ok(val) = arg.parse::<f64>() {
-                max = Some(max.map_or(val, |m| m.max(val)));
-            }
+        let result = self.visit_numeric_inputs(args, origin, |value| {
+            max = Some(max.map_or(value, |max| max.max(value)));
+        });
+        if result.is_err() {
+            return "#ERROR".to_string();
         }
 
         match max {
-            Some(val) => {
-                if val.fract() == 0.0 {
-                    format!("{:.0}", val)
-                } else {
-                    format!("{}", val)
-                }
-            }
+            Some(val) if val.fract() == 0.0 => format!("{:.0}", val),
+            Some(val) => format!("{}", val),
             None => "#ERROR".to_string(),
         }
     }
 
-    pub fn evaluate_correl(&mut self, args: &str) -> String {
+    fn evaluate_correl(&mut self, args: &str, origin: (usize, usize)) -> String {
         // CORREL expects two ranges: CORREL(range1, range2)
         let parts = self.split_function_args(args);
         if parts.len() != 2 {
@@ -477,8 +428,8 @@ impl<'sheet> FormulaEvaluator<'sheet> {
         let range2 = parts[1].trim();
 
         // Collect values from both ranges
-        let values1 = self.collect_range_values(range1);
-        let values2 = self.collect_range_values(range2);
+        let values1 = self.collect_range_values(range1, origin);
+        let values2 = self.collect_range_values(range2, origin);
 
         let (values1, values2) = match (values1, values2) {
             (Some(v1), Some(v2)) => (v1, v2),
@@ -520,35 +471,10 @@ impl<'sheet> FormulaEvaluator<'sheet> {
         format!("{:.6}", correlation)
     }
 
-    fn collect_range_values(&mut self, range: &str) -> Option<Vec<f64>> {
+    fn collect_range_values(&mut self, range: &str, origin: (usize, usize)) -> Option<Vec<f64>> {
         let mut values = Vec::new();
-
-        if let Some((start, end)) = range.split_once(':') {
-            if let (Some((sr, sc)), Some((er, ec))) =
-                (self.parse_cell_ref(start), self.parse_cell_ref(end))
-            {
-                let min_row = sr.min(er);
-                let max_row = sr.max(er);
-                let min_col = sc.min(ec);
-                let max_col = sc.max(ec);
-                for row in min_row..=max_row {
-                    for col in min_col..=max_col {
-                        if let Some(val) = self.get_cell_value_at(row, col) {
-                            values.push(val);
-                        }
-                    }
-                }
-            } else {
-                return None;
-            }
-        } else if let Some(val) = self.get_cell_value(range) {
-            values.push(val);
-        } else if let Ok(val) = range.parse::<f64>() {
-            values.push(val);
-        } else {
-            return None;
-        }
-
+        self.visit_numeric_inputs(range, origin, |value| values.push(value))
+            .ok()?;
         Some(values)
     }
 
@@ -571,24 +497,16 @@ impl<'sheet> FormulaEvaluator<'sheet> {
         }
     }
 
-    pub fn split_function_args<'a>(&self, args: &'a str) -> Vec<&'a str> {
-        let mut parts = Vec::new();
-        let mut depth = 0;
+    fn split_function_args<'a>(&self, args: &'a str) -> Vec<&'a str> {
         let mut start = 0;
-
-        for (i, c) in args.char_indices() {
-            match c {
-                '(' => depth += 1,
-                ')' => depth -= 1,
-                ',' if depth == 0 => {
-                    parts.push(&args[start..i]);
-                    start = i + 1;
-                }
-                _ => {}
-            }
-        }
-        parts.push(&args[start..]);
-        parts
+        formula_ref::top_level_delimiters(args, b',')
+            .chain(std::iter::once(args.len()))
+            .map(|end| {
+                let argument = &args[start..end];
+                start = end + 1;
+                argument
+            })
+            .collect()
     }
 
     pub fn evaluate_condition(&mut self, condition: &str, current_row: usize, current_col: usize) -> Option<bool> {
@@ -717,76 +635,36 @@ impl<'sheet> FormulaEvaluator<'sheet> {
         self.evaluate_cell(row, col).parse().ok()
     }
 
-    pub fn evaluate_count(&mut self, args: &str) -> String {
+    fn evaluate_count(&mut self, args: &str, origin: (usize, usize)) -> String {
         let mut count = 0;
-
-        for arg in args.split(',') {
-            let arg = arg.trim();
-
-            if let Some((start, end)) = arg.split_once(':') {
-                if let (Some((sr, sc)), Some((er, ec))) =
-                    (self.parse_cell_ref(start), self.parse_cell_ref(end))
-                {
-                    let min_row = sr.min(er);
-                    let max_row = sr.max(er);
-                    let min_col = sc.min(ec);
-                    let max_col = sc.max(ec);
-                    for row in min_row..=max_row {
-                        for col in min_col..=max_col {
-                            if self.get_cell_value_at(row, col).is_some() {
-                                count += 1;
-                            }
-                        }
-                    }
-                } else {
-                    return "#ERROR".to_string();
-                }
-            } else if self.get_cell_value(arg).is_some() {
-                count += 1;
-            } else if arg.parse::<f64>().is_ok() {
-                count += 1;
-            }
+        if self
+            .visit_numeric_inputs(args, origin, |_| count += 1)
+            .is_err()
+        {
+            return "#ERROR".to_string();
         }
-
         format!("{}", count)
     }
 
-    pub fn evaluate_counta(&mut self, args: &str) -> String {
+    fn evaluate_counta(&mut self, args: &str, (row, col): (usize, usize)) -> String {
         let mut count = 0;
-
-        for arg in args.split(',') {
-            let arg = arg.trim();
-
-            if let Some((start, end)) = arg.split_once(':') {
-                if let (Some((sr, sc)), Some((er, ec))) =
-                    (self.parse_cell_ref(start), self.parse_cell_ref(end))
-                {
-                    let min_row = sr.min(er);
-                    let max_row = sr.max(er);
-                    let min_col = sc.min(ec);
-                    let max_col = sc.max(ec);
-                    for row in min_row..=max_row {
-                        for col in min_col..=max_col {
-                            if !self.raw_cell_with_dependency(row, col).is_empty() {
-                                count += 1;
-                            }
-                        }
-                    }
-                } else {
-                    return "#ERROR".to_string();
+        let result = self.visit_aggregate_inputs(args, |evaluator, input| {
+            let nonempty = match input {
+                AggregateInput::Cell(row, col) => {
+                    !evaluator.raw_cell_with_dependency(row, col).is_empty()
                 }
-            } else {
-                let cell_content = if let Some((row, col)) = self.parse_cell_ref(arg) {
-                    self.raw_cell_with_dependency(row, col)
-                } else {
-                    arg
-                };
-                if !cell_content.is_empty() {
-                    count += 1;
+                AggregateInput::Scalar(arg) if arg.contains('(') => {
+                    !evaluator.evaluate_arg(arg, row, col).is_empty()
                 }
+                AggregateInput::Scalar(arg) => !arg.is_empty(),
+            };
+            if nonempty {
+                count += 1;
             }
+        });
+        if result.is_err() {
+            return "#ERROR".to_string();
         }
-
         format!("{}", count)
     }
 
@@ -1740,42 +1618,14 @@ impl<'sheet> FormulaEvaluator<'sheet> {
         result
     }
 
-    pub fn evaluate_product(&mut self, args: &str) -> String {
+    fn evaluate_product(&mut self, args: &str, origin: (usize, usize)) -> String {
         let mut product = 1.0;
         let mut has_values = false;
-
-        for arg in args.split(',') {
-            let arg = arg.trim();
-
-            if let Some((start, end)) = arg.split_once(':') {
-                if let (Some((sr, sc)), Some((er, ec))) =
-                    (self.parse_cell_ref(start), self.parse_cell_ref(end))
-                {
-                    let min_row = sr.min(er);
-                    let max_row = sr.max(er);
-                    let min_col = sc.min(ec);
-                    let max_col = sc.max(ec);
-                    for row in min_row..=max_row {
-                        for col in min_col..=max_col {
-                            if let Some(val) = self.get_cell_value_at(row, col) {
-                                product *= val;
-                                has_values = true;
-                            }
-                        }
-                    }
-                } else {
-                    return "#ERROR".to_string();
-                }
-            } else if let Some(val) = self.get_cell_value(arg) {
-                product *= val;
-                has_values = true;
-            } else if let Ok(val) = arg.parse::<f64>() {
-                product *= val;
-                has_values = true;
-            }
-        }
-
-        if !has_values {
+        let result = self.visit_numeric_inputs(args, origin, |value| {
+            product *= value;
+            has_values = true;
+        });
+        if result.is_err() || !has_values {
             return "#ERROR".to_string();
         }
 
@@ -1786,38 +1636,10 @@ impl<'sheet> FormulaEvaluator<'sheet> {
         }
     }
 
-    pub fn evaluate_median(&mut self, args: &str) -> String {
+    fn evaluate_median(&mut self, args: &str, origin: (usize, usize)) -> String {
         let mut values = Vec::new();
-
-        for arg in args.split(',') {
-            let arg = arg.trim();
-
-            if let Some((start, end)) = arg.split_once(':') {
-                if let (Some((sr, sc)), Some((er, ec))) =
-                    (self.parse_cell_ref(start), self.parse_cell_ref(end))
-                {
-                    let min_row = sr.min(er);
-                    let max_row = sr.max(er);
-                    let min_col = sc.min(ec);
-                    let max_col = sc.max(ec);
-                    for row in min_row..=max_row {
-                        for col in min_col..=max_col {
-                            if let Some(val) = self.get_cell_value_at(row, col) {
-                                values.push(val);
-                            }
-                        }
-                    }
-                } else {
-                    return "#ERROR".to_string();
-                }
-            } else if let Some(val) = self.get_cell_value(arg) {
-                values.push(val);
-            } else if let Ok(val) = arg.parse::<f64>() {
-                values.push(val);
-            }
-        }
-
-        if values.is_empty() {
+        let result = self.visit_numeric_inputs(args, origin, |value| values.push(value));
+        if result.is_err() || values.is_empty() {
             return "#ERROR".to_string();
         }
 
@@ -1895,6 +1717,54 @@ mod tests {
         sheet.set_cell(0, 0, "2".into());
         assert_eq!(sheet.evaluate_cell(0, 1), "2");
         assert_eq!(sheet.evaluate_cell(0, 2), "4");
+    }
+
+    #[test]
+    fn nested_aggregate_arguments_detect_cycles_and_keep_if_lazy() {
+        let mut sheet = Spreadsheet::new();
+        for (function, count_or_value) in [
+            ("SUM", "7"),
+            ("AVG", "7"),
+            ("MIN", "7"),
+            ("MAX", "7"),
+            ("COUNT", "1"),
+            ("COUNTA", "1"),
+            ("PRODUCT", "7"),
+            ("MEDIAN", "7"),
+        ] {
+            sheet.set_cell(0, 0, format!("={function}(ABS(A1))"));
+            assert_eq!(sheet.evaluate_cell(0, 0), "#CYCLE!", "{function}");
+            sheet.set_cell(0, 0, format!("={function}(IF(0,A1,7))"));
+            assert_eq!(sheet.evaluate_cell(0, 0), count_or_value, "{function}");
+        }
+
+        sheet.set_cell(0, 0, "=CORREL(ABS(A1),B1:B2)".into());
+        assert_eq!(sheet.evaluate_cell(0, 0), "#CYCLE!");
+        let formula = r#"=SUM(IF(1,7,CONCAT("),:",A1)),8)"#;
+        sheet.set_cell(0, 0, formula.into());
+        assert_eq!(sheet.evaluate_cell(0, 0), "15");
+    }
+
+    #[test]
+    fn deleted_references_propagate_from_nested_aggregate_arguments() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set_cell(1, 0, "-7".into());
+        let functions = [
+            "SUM", "AVG", "MIN", "MAX", "COUNT", "COUNTA", "PRODUCT", "MEDIAN",
+        ];
+        for (col, function) in functions.iter().enumerate() {
+            sheet.set_cell(0, col, format!("={function}(ABS(A2))"));
+        }
+        sheet.set_cell(0, functions.len(), "=SUM(IF(0,A2,7))".into());
+        sheet.selected_rows = Some((1, 1));
+        sheet.delete_selected_rows();
+
+        for (col, function) in functions.iter().enumerate() {
+            assert_eq!(sheet.get_cell(0, col), format!("={function}(ABS(#REF!))"));
+            assert_eq!(sheet.evaluate_cell(0, col), "#REF!", "{function}");
+        }
+        assert_eq!(sheet.get_cell(0, functions.len()), "=SUM(IF(0,#REF!,7))");
+        assert_eq!(sheet.evaluate_cell(0, functions.len()), "7");
     }
 
     #[test]
